@@ -1,0 +1,41 @@
+{% extends "layouts/base.html" %}
+{% block title %}{{ page.title }}{% endblock %}
+{% block body %}
+<div class="doc-shell" data-site-mount="{{ site.mount }}">
+  {% include "partials/header.html" %}
+  <div class="doc-frame">
+    <aside class="doc-sidebar" id="sidebar-panel" aria-label="Site navigation">
+      <div class="doc-sidebar-inner">
+        {% include "partials/sidebar.html" %}
+      </div>
+      <div class="sidebar-resize-handle" id="sidebar-resize-handle" aria-hidden="true"></div>
+    </aside>
+    <div class="doc-backdrop" id="sidebar-backdrop" hidden></div>
+    <main class="doc-main">
+      {% include "partials/breadcrumbs.html" %}
+      <article class="doc-article prose">
+        {% if site_index %}
+        {% include "partials/site-index.html" %}
+        {% else %}
+        {{ page.html | safe }}
+        {% endif %}
+      </article>
+      <nav class="doc-prev-next" aria-label="Adjacent pages">
+        {% if prev %}
+        <a class="doc-prev-next-link doc-prev" href="{{ prev.url }}"><span class="label">Previous</span><span class="title">{{ prev.title }}</span></a>
+        {% endif %}
+        {% if next %}
+        <a class="doc-prev-next-link doc-next" href="{{ next.url }}"><span class="label">Next</span><span class="title">{{ next.title }}</span></a>
+        {% endif %}
+      </nav>
+      {% include "partials/footer.html" %}
+    </main>
+    <aside class="doc-toc-panel" id="toc-panel" aria-label="On this page">
+      <div class="doc-toc-inner">
+        {% include "partials/toc.html" %}
+      </div>
+    </aside>
+    <div class="doc-toc-backdrop" id="toc-backdrop" hidden></div>
+  </div>
+</div>
+{% endblock %}

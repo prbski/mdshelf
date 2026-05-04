@@ -1,0 +1,10 @@
+{% if breadcrumbs %}
+<nav class="breadcrumbs" aria-label="Breadcrumb">
+  <ol class="breadcrumbs-list">
+    {% for crumb in breadcrumbs %}
+    <li class="breadcrumbs-item"><a href="{{ crumb.url }}">{{ crumb.title }}</a></li>
+    {% endfor %}
+  </ol>
+</nav>
+{% endif %}
+

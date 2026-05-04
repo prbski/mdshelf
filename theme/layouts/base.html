@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>{% block title %}mdshelf{% endblock %}</title>
+  <link rel="stylesheet" href="/__mdshelf/syntax.css">
+  <link rel="stylesheet" href="/__assets/css/main.css">
+  <link rel="stylesheet" href="/__assets/css/syntax.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css" crossorigin="anonymous">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js" crossorigin="anonymous"></script>
+  <script>
+    (function() {
+      var root = document.documentElement;
+      try {
+        var theme = localStorage.getItem("mdshelf-theme");
+        if (theme === "dark" || theme === "light") root.setAttribute("data-theme", theme);
+        if (localStorage.getItem("mdshelf-toc-hidden") === "true") root.classList.add("toc-hidden");
+        var sidebarW = localStorage.getItem("mdshelf-sidebar-w");
+        if (sidebarW) root.style.setProperty("--sidebar-w", sidebarW);
+        root.classList.add("sidebar-loading");
+      } catch(e) {}
+    })();
+  </script>
+  <script src="/__assets/js/ui.js" defer></script>
+  <script defer>
+    document.addEventListener("DOMContentLoaded", () => {
+      if (typeof katex === "undefined") return;
+      document.querySelectorAll("[data-math-style='inline']").forEach(el => {
+        katex.render(el.textContent, el, { throwOnError: false, displayMode: false });
+      });
+      document.querySelectorAll("[data-math-style='display']").forEach(el => {
+        katex.render(el.textContent, el, { throwOnError: false, displayMode: true });
+      });
+    });
+  </script>
+  {% if site %}
+  <style>
+    :root {
+      --accent: {{ site.color }};
+      --accent-hover: color-mix(in srgb, {{ site.color }} 80%, var(--mix-blend-dark, black));
+      --accent-soft: color-mix(in srgb, {{ site.color }} 15%, transparent);
+    }
+    :root[data-theme="dark"] {
+      --accent: {{ site.color }};
+      --accent-hover: color-mix(in srgb, {{ site.color }} 80%, var(--mix-blend-dark, white));
+      --accent-soft: color-mix(in srgb, {{ site.color }} 15%, transparent);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --accent: {{ site.color }};
+        --accent-hover: color-mix(in srgb, {{ site.color }} 80%, var(--mix-blend-dark, white));
+        --accent-soft: color-mix(in srgb, {{ site.color }} 15%, transparent);
+      }
+    }
+  </style>
+  {% endif %}
+</head>
+<body class="mdshelf-body">
+{% block body %}{% endblock %}
+</body>
+</html>

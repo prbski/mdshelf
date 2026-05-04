@@ -1,0 +1,12 @@
+{% extends "layouts/base.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block body %}
+<div class="error-shell">
+  <main class="error-main">
+    <p class="error-code">{{ status }}</p>
+    <h1>{{ title }}</h1>
+    <p class="error-message">{{ message }}</p>
+    <p class="error-links"><a href="/">Home</a></p>
+  </main>
+</div>
+{% endblock %}

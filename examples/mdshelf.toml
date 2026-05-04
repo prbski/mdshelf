@@ -1,0 +1,31 @@
+# mdshelf configuration. Run `mdshelf check --config mdshelf.toml` to validate.
+
+host = "127.0.0.1"
+port = 4444
+
+[server]
+live_reload = true
+log_level = "info"
+
+[theme]
+# `name` selects a built-in theme. Currently only "mdshelf-theme" ships.
+name = "mdshelf-theme"
+# Set `directory` to fully replace the bundled theme with your own:
+# directory = "./theme"
+
+# Each site is mounted under its own URL prefix. Add as many as you like.
+[[sites]]
+path = "./content"
+mount = "/docs"
+title = "mdshelf demo"
+
+[[sites]]
+path = "./content"
+mount = "/notes"
+title = "My Notes"
+color = "#e11d48"
+
+[[sites]]
+path = "./content"
+mount = "/handbook"
+title = "Engineering Handbook"

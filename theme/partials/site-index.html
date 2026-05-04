@@ -1,0 +1,52 @@
+<div class="site-index" aria-labelledby="site-index-title">
+  <header class="site-index-hero">
+    <h1 id="site-index-title" class="site-index-title">{{ page.title }}</h1>
+    <p class="site-index-lead">{{ site_index.lead }}</p>
+    <p class="site-index-hint">{{ site_index.hint }}</p>
+  </header>
+  {% if site_index.rows | length == 0 %}
+  <p class="site-index-empty">No published pages yet.</p>
+  {% else %}
+  <div class="site-index-list" role="list">
+    {% for row in site_index.rows %}
+    <div
+      class="site-index-row {% if row.is_folder_heading %}site-index-row-folder{% else %}site-index-row-page{% endif %}"
+      role="listitem"
+      style="--site-index-depth: {{ row.depth }}"
+    >
+      {% if row.is_folder_heading %}
+      <div class="site-index-folder">
+        <div class="site-index-folder-head">
+          {% if row.url %}
+          <a class="site-index-folder-link" href="{{ row.url }}">
+            <span class="site-index-folder-label">{{ row.title }}</span>
+          </a>
+          {% else %}
+          <span class="site-index-folder-label">{{ row.title }}</span>
+          {% endif %}
+          {% if row.path_label %}
+          <span class="site-index-folder-path">{{ row.path_label }}/</span>
+          {% endif %}
+        </div>
+        {% if row.description %}
+        <p class="site-index-folder-desc">{{ row.description }}</p>
+        {% endif %}
+      </div>
+      {% else %}
+      <a class="site-index-card" href="{{ row.url }}">
+        <span class="site-index-card-main">
+          <span class="site-index-card-title">{{ row.title }}</span>
+          {% if row.path_label %}
+          <span class="site-index-card-path" aria-hidden="true">{{ row.path_label }}</span>
+          {% endif %}
+        </span>
+        {% if row.description %}
+        <span class="site-index-card-desc">{{ row.description }}</span>
+        {% endif %}
+      </a>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>

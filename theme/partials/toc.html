@@ -1,0 +1,12 @@
+{% if page.headings %}
+<div class="toc">
+  <p class="toc-title">On this page</p>
+  <ol class="toc-list">
+    {% for heading in page.headings %}
+    {% if heading.level >= 2 and heading.level <= 3 %}
+    <li class="toc-item toc-level-{{ heading.level }}"><a href="#{{ heading.id }}">{{ heading.text }}</a></li>
+    {% endif %}
+    {% endfor %}
+  </ol>
+</div>
+{% endif %}
