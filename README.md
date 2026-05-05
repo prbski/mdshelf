@@ -1,6 +1,12 @@
 # mdshelf
 
-A single-binary Rust server that turns folders of Markdown files into browsable sites — with hot reload, frontmatter, MiniJinja layouts, and a bundled mobile-first theme. Mount multiple content trees under their own URL prefixes (e.g. `/docs`, `/notes`, `/blog`).
+Turn any folder of Markdown files into a fast, beautiful, browsable site. Point mdshelf at your OpenClaw, Hermes, GBrain, wikis, notes, docs, etc. — mount each one under its own URL (e.g. `/agent`, `/hermes`, `gbrain`, `/docs`, `/notes`, `/blog`) — and read them anywhere with hot reload, clean typography, and a mobile-first theme out of the box.
+
+Pairs beautifully with [Tailscale](https://tailscale.com): one command serves your shelf to every device on your tailnet — phone, iPad, laptop. Sharing with Tailscale is fully private by default: no port forwarding, no public DNS, nothing exposed to the open internet.
+
+One command installs it as a native system service (launchd, systemd, or Windows SCM) that runs quietly in the background and survives reboots.
+
+Ships as a single static Rust binary with zero runtime dependencies.
 
 ## Features
 
@@ -146,7 +152,7 @@ mount = "/blog"
 title = "Blog"
 ```
 
-Each `[[sites]]` block mounts a directory at a URL prefix. Only `.md` files are rendered — other files (images, fonts, etc.) are served as static assets. `mount` must not be `/`. Add as many sites as you like.
+Each `[[sites]]` block mounts a directory at a URL prefix. Only `.md` files are rendered — other files are ignored. `mount` must not be `/`. Add as many sites as you like.
 
 See [examples/mdshelf.toml](examples/mdshelf.toml) for a complete example.
 
@@ -179,11 +185,11 @@ Syntax highlighting CSS is served from `/__mdshelf/syntax.css` (class-based, lig
 Install and manage a native service (launchd on macOS, systemd on Linux, SCM on Windows):
 
 ```bash
-mdshelf install
-mdshelf start
-mdshelf status
-mdshelf stop
-mdshelf uninstall
+sudo mdshelf install
+sudo mdshelf start
+sudo mdshelf status
+sudo mdshelf stop
+sudo mdshelf uninstall
 ```
 
 `--config` is optional and follows the same default search order as other commands. The resolved absolute path is baked into the service definition at install time, so the service always finds its config regardless of working directory.
@@ -226,7 +232,7 @@ Tailscale provisions a certificate automatically and makes the site available **
 tailscale serve status   # confirm the URL
 ```
 
-Pair it with `mdshelf install && mdshelf start` (see [System service](#system-service)) so both services survive reboots.
+Pair it with `sudo mdshelf install && sudo mdshelf start` (see [System service](#system-service)) so both services survive reboots.
 
 To stop serving:
 
