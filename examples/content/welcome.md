@@ -13,10 +13,10 @@ sidebar automatically, mirroring the folder hierarchy on disk.
 
 ## Highlights
 
-- **Astro-style theming**: layered theme directories, frontmatter, layouts, partials.
+- **Live reload**: edit a file, see the page update without a manual refresh.
 - **Mobile-first reading**: sidebar and table of contents collapse into off-canvas
   drawers on small screens so reading content stays the priority.
-- **Live reload**: edit a file, see the page update without a manual refresh.
+- **Themes**: layered theme directories, frontmatter, layouts, partials.
 - **CLI or system service**: run `mdshelf serve` ad-hoc, or `mdshelf install` to
   register a launchd / systemd / Windows service that runs in the background.
 

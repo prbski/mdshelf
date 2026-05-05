@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use comrak::{
     Anchorizer, Arena, Options,
-    nodes::{AstNode, NodeValue},
+    nodes::{AstNode, NodeHtmlBlock, NodeValue},
     options::{Extension, Parse, Plugins, Render},
     plugins::syntect::SyntectAdapter,
 };
@@ -117,6 +117,20 @@ impl MarkdownRenderer {
             });
         }
 
+        let mermaid_literal = match &node.data.borrow().value {
+            NodeValue::CodeBlock(code) if code.info.trim() == "mermaid" => {
+                Some(code.literal.clone())
+            }
+            _ => None,
+        };
+        if let Some(literal) = mermaid_literal {
+            node.data.borrow_mut().value = NodeValue::HtmlBlock(NodeHtmlBlock {
+                block_type: 6,
+                literal: format!("<div class=\"mermaid\">{}</div>\n", html_escape(&literal)),
+            });
+            return;
+        }
+
         match &mut node.data.borrow_mut().value {
             NodeValue::Link(link) => {
                 if let Some(rewritten) = rewrite_link(&link.url, ctx) {
@@ -229,6 +243,20 @@ fn strip_index_segment(path: &str) -> String {
     } else {
         path.to_string()
     }
+}
+
+fn html_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn join_relative(base: &std::path::Path, rel: &str) -> String {

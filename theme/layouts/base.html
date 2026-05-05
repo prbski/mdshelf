@@ -7,8 +7,9 @@
   <link rel="stylesheet" href="/__mdshelf/syntax.css">
   <link rel="stylesheet" href="/__assets/css/main.css">
   <link rel="stylesheet" href="/__assets/css/syntax.css">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css" crossorigin="anonymous">
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js" crossorigin="anonymous"></script>
+  <link rel="stylesheet" href="/__assets/vendor/inter/inter.css">
+  <link rel="stylesheet" href="/__assets/vendor/katex/katex.min.css">
+  <script defer src="/__assets/vendor/katex/katex.min.js"></script>
   <script>
     (function() {
       var root = document.documentElement;
@@ -23,6 +24,8 @@
     })();
   </script>
   <script src="/__assets/js/ui.js" defer></script>
+  <script src="/__assets/vendor/mermaid/mermaid.min.js" defer></script>
+  <script src="/__assets/js/mermaid-viewer.js" defer></script>
   <script defer>
     document.addEventListener("DOMContentLoaded", () => {
       if (typeof katex === "undefined") return;
@@ -32,6 +35,39 @@
       document.querySelectorAll("[data-math-style='display']").forEach(el => {
         katex.render(el.textContent, el, { throwOnError: false, displayMode: true });
       });
+    });
+  </script>
+  <script defer>
+    function resolveMermaidTheme() {
+      const attr = document.documentElement.getAttribute('data-theme');
+      if (attr === 'dark') return 'dark';
+      if (attr === 'light') return 'default';
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'default';
+    }
+
+    async function renderMermaid() {
+      if (typeof mermaid === 'undefined') return;
+      const diagrams = document.querySelectorAll('.mermaid');
+      if (!diagrams.length) return;
+
+      diagrams.forEach(el => {
+        el.removeAttribute('data-processed');
+        el.innerHTML = el.textContent;
+      });
+
+      mermaid.initialize({ startOnLoad: false, theme: resolveMermaidTheme() });
+      await mermaid.run({ nodes: diagrams });
+
+      diagrams.forEach(el => window.mermaidViewerDecorate?.(el));
+    }
+
+    document.addEventListener('DOMContentLoaded', renderMermaid);
+
+    const themeObserver = new MutationObserver(() => renderMermaid());
+    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+      if (!document.documentElement.hasAttribute('data-theme')) renderMermaid();
     });
   </script>
   {% if site %}
