@@ -1,7 +1,16 @@
 <nav class="sidebar-nav" aria-label="Sidebar">
-  <ul class="sidebar-list sidebar-list-depth">
+  <ul class="sidebar-list sidebar-list-depth" id="sidebar-list">
     {% for row in nav_flat %}
-    <li class="sidebar-item" data-sidebar-depth="{{ row.depth }}" style="--sidebar-depth: {{ row.depth }}">
+    <li
+      class="sidebar-item"
+      data-sidebar-depth="{{ row.depth }}"
+      data-sidebar-order="{{ loop.index0 }}"
+      data-sidebar-title="{{ row.title }}"
+      data-sidebar-filename="{{ row.filename }}"
+      data-sidebar-date="{{ row.modified_at_ms }}"
+      data-sidebar-folder-key="{{ row.stable_key }}"
+      style="--sidebar-depth: {{ row.depth }}"
+    >
       {% if row.url %}
       <a class="sidebar-link {% if row.is_index %}is-index{% endif %} {% if page.url == row.url %}is-active{% endif %}" href="{{ row.url }}">{{ row.title }}</a>
       {% else %}

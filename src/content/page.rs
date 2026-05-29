@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
 use gray_matter::{Matter, ParsedEntity, engine::YAML};
@@ -18,6 +19,10 @@ pub struct Page {
     pub url: String,
     pub is_index: bool,
     pub title: String,
+    /// Basename of the source file (e.g. `welcome.md`).
+    pub filename: String,
+    /// File modification time in milliseconds since the Unix epoch.
+    pub modified_at_ms: i64,
     pub description: Option<String>,
     pub layout: String,
     pub sidebar_order: Option<i64>,
@@ -78,6 +83,11 @@ impl Page {
             })
             .unwrap_or_else(|| derive_title_from_path(rel_path));
         let layout = typed.layout.unwrap_or_else(|| "doc".to_string());
+        let filename = rel_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "untitled.md".to_string());
+        let modified_at_ms = file_modified_at_ms(&fs_path);
 
         Ok(Page {
             fs_path,
@@ -86,6 +96,8 @@ impl Page {
             url,
             is_index,
             title,
+            filename,
+            modified_at_ms,
             description: typed.description,
             layout,
             sidebar_order: typed.sidebar_order,
@@ -128,6 +140,15 @@ pub fn join_url(mount: &str, url_path: &str) -> String {
     } else {
         format!("{}/{}", m, url_path)
     }
+}
+
+fn file_modified_at_ms(path: &Path) -> i64 {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 fn derive_title_from_path(rel: &Path) -> String {

@@ -11,29 +11,100 @@ const INDEX_SLUG: &str = "__index__";
 pub struct SidebarNavRow {
     pub depth: u32,
     pub title: String,
+    pub filename: String,
+    pub modified_at_ms: i64,
+    /// Stable key for folder collapse state and client-side identity.
+    pub stable_key: String,
     pub url: Option<String>,
     pub is_index: bool,
 }
 
 /// Flattens the nav tree for templates that cannot recurse (sidebar lists every depth).
-pub fn flatten_nav_sidebar_rows(nav_root: &NavNode) -> Vec<SidebarNavRow> {
+pub fn flatten_nav_sidebar_rows(
+    nav_root: &NavNode,
+    pages: &BTreeMap<String, Page>,
+) -> Vec<SidebarNavRow> {
     let mut rows = Vec::new();
     for child in &nav_root.children {
-        flatten_nav_depth_first(child, 0, &mut rows);
+        flatten_nav_depth_first(child, 0, pages, &mut rows);
     }
     rows
 }
 
-fn flatten_nav_depth_first(node: &NavNode, depth: u32, rows: &mut Vec<SidebarNavRow>) {
+fn flatten_nav_depth_first(
+    node: &NavNode,
+    depth: u32,
+    pages: &BTreeMap<String, Page>,
+    rows: &mut Vec<SidebarNavRow>,
+) {
+    let (filename, modified_at_ms) = sidebar_row_metadata(node, pages);
     rows.push(SidebarNavRow {
         depth,
         title: node.title.clone(),
+        filename,
+        modified_at_ms,
+        stable_key: sidebar_stable_key(node),
         url: node.url.clone(),
         is_index: node.slug == INDEX_SLUG,
     });
     for child in &node.children {
-        flatten_nav_depth_first(child, depth + 1, rows);
+        flatten_nav_depth_first(child, depth + 1, pages, rows);
     }
+}
+
+fn sidebar_stable_key(node: &NavNode) -> String {
+    node.url_path
+        .clone()
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| node.slug.clone())
+}
+
+fn sidebar_row_metadata(node: &NavNode, pages: &BTreeMap<String, Page>) -> (String, i64) {
+    if node.url.is_some() {
+        if let Some(url_path) = node.url_path.as_deref() {
+            if let Some(page) = pages.get(url_path) {
+                let filename = if node.slug == INDEX_SLUG {
+                    index_row_filename(url_path)
+                } else {
+                    page.filename.clone()
+                };
+                return (filename, page.modified_at_ms);
+            }
+        }
+    }
+    let filename = if node.slug.is_empty() {
+        node.title.clone()
+    } else {
+        node.slug.clone()
+    };
+    let modified_at_ms = max_modified_at_ms(node, pages);
+    (filename, modified_at_ms)
+}
+
+/// Label for folder `index.md` rows in filename mode (not the literal `index.md` basename).
+fn index_row_filename(url_path: &str) -> String {
+    if url_path.is_empty() {
+        "index.md".to_string()
+    } else {
+        url_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(url_path)
+            .to_string()
+    }
+}
+
+fn max_modified_at_ms(node: &NavNode, pages: &BTreeMap<String, Page>) -> i64 {
+    let mut max_ms = 0_i64;
+    if let Some(url_path) = node.url_path.as_deref() {
+        if let Some(page) = pages.get(url_path) {
+            max_ms = max_ms.max(page.modified_at_ms);
+        }
+    }
+    for child in &node.children {
+        max_ms = max_ms.max(max_modified_at_ms(child, pages));
+    }
+    max_ms
 }
 
 /// A node in the recursive sidebar navigation tree. Each node is a section

@@ -90,7 +90,7 @@ impl Site {
         }
 
         let nav_root = NavNode::build(&title, &mount, &pages);
-        let nav_flat = Arc::new(flatten_nav_sidebar_rows(&nav_root));
+        let nav_flat = Arc::new(flatten_nav_sidebar_rows(&nav_root, &pages));
 
         Ok(Self {
             mount,

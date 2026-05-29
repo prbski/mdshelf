@@ -1,0 +1,29 @@
+<div class="sidebar-options-popover" id="sidebar-options-menu" role="dialog" aria-label="List options" hidden>
+  <div class="sidebar-options-field">
+    <span class="sidebar-options-label" id="sidebar-label-heading">Show</span>
+    <div class="sidebar-pill-toggle" role="group" aria-labelledby="sidebar-label-heading">
+      <button type="button" class="sidebar-pill-btn is-active" data-sidebar-label-mode="title" aria-pressed="true">Titles</button>
+      <button type="button" class="sidebar-pill-btn" data-sidebar-label-mode="filename" aria-pressed="false">Name</button>
+    </div>
+  </div>
+  <div class="sidebar-options-field">
+    <span class="sidebar-options-label" id="sidebar-sort-heading">Sort files</span>
+    <div class="sidebar-sort-bar" role="group" aria-labelledby="sidebar-sort-heading">
+      <div class="sidebar-pill-toggle" role="group" aria-label="Sort by">
+        <button type="button" class="sidebar-pill-btn" data-sidebar-sort-axis="date" aria-pressed="false">Date</button>
+        <button type="button" class="sidebar-pill-btn is-active" data-sidebar-sort-axis="name" aria-pressed="true">Name</button>
+      </div>
+      <button
+        type="button"
+        class="sidebar-sort-direction"
+        id="sidebar-sort-direction"
+        aria-label="Sort A to Z"
+      >
+        <svg class="sidebar-sort-direction-icon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 5v14"/>
+          <path d="m19 12-7 7-7-7"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+</div>
