@@ -1,7 +1,21 @@
 (() => {
+  const lastSiteStorageKey = "mdshelf-last-site";
+
+  // The remembered page can disappear when content changes. If we land on a 404
+  // whose path is the remembered page, forget it so "Home" cannot loop back here.
+  if (document.querySelector(".error-shell")) {
+    try {
+      if (localStorage.getItem(lastSiteStorageKey) === window.location.pathname) {
+        localStorage.removeItem(lastSiteStorageKey);
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
   if (window.location.pathname === "/") {
     try {
-      const lastSite = localStorage.getItem("mdshelf-last-site");
+      const lastSite = localStorage.getItem(lastSiteStorageKey);
       if (lastSite && lastSite !== "/") {
         window.location.replace(lastSite);
         return;
@@ -68,7 +82,7 @@
   }
 
   try {
-    localStorage.setItem("mdshelf-last-site", window.location.pathname);
+    localStorage.setItem(lastSiteStorageKey, window.location.pathname);
   } catch {
     /* ignore */
   }
