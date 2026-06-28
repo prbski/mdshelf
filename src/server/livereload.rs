@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -7,10 +8,11 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::{extract::State, response::IntoResponse};
 use futures::{SinkExt, StreamExt};
 use notify_debouncer_full::{DebounceEventResult, new_debouncer, notify::RecursiveMode};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tracing::{error, warn};
 
 use crate::config::Config;
+use crate::content::source::should_trigger_rebuild;
 use crate::content::Universe;
 use crate::render::Renderer;
 use crate::server::AppState;
@@ -20,7 +22,7 @@ const RELOAD_MESSAGE: &str = "reload";
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 
 pub async fn livereload_ws(
-    State(state): State<std::sync::Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     if !state.live_reload_enabled {
@@ -65,14 +67,24 @@ async fn handle_socket(socket: WebSocket, mut reload_rx: broadcast::Receiver<()>
     }
 }
 
-pub async fn spawn_watcher(state: std::sync::Arc<AppState>) -> Result<()> {
-    let mut paths: Vec<PathBuf> = state.config.sites.iter().map(|s| s.path.clone()).collect();
-    paths.extend(state.renderer.read().await.theme().watch_dirs());
+pub async fn spawn_watcher(state: Arc<AppState>) -> Result<()> {
+    let site_roots: Vec<PathBuf> = state.config.sites.iter().map(|site| site.path.clone()).collect();
+    let theme_dirs = state.renderer.read().await.theme().watch_dirs();
+    let mut watch_paths = site_roots.clone();
+    watch_paths.extend(theme_dirs.clone());
 
-    let tx = state.live_reload_tx.clone();
+    let reload_tx = state.live_reload_tx.clone();
     let handle = tokio::runtime::Handle::current();
-    let state_weak = std::sync::Arc::downgrade(&state);
+    let state_weak = Arc::downgrade(&state);
     let config = state.config.clone();
+    let (rebuild_trigger_tx, rebuild_trigger_rx) = mpsc::unbounded_channel();
+
+    handle.spawn(rebuild_worker(
+        state_weak.clone(),
+        config.clone(),
+        reload_tx.clone(),
+        rebuild_trigger_rx,
+    ));
 
     thread::spawn(move || {
         let handler = move |result: DebounceEventResult| {
@@ -88,29 +100,26 @@ pub async fn spawn_watcher(state: std::sync::Arc<AppState>) -> Result<()> {
             if events.is_empty() {
                 return;
             }
-            let Some(state) = state_weak.upgrade() else {
-                return;
-            };
-            let cfg = config.clone();
-            let reload_tx = tx.clone();
-            handle.spawn(async move {
-                if let Err(err) = rebuild_content(&state, &cfg).await {
-                    error!(?err, "failed to rebuild after file change");
-                    return;
-                }
-                let _ = reload_tx.send(());
+            let relevant_change = events.iter().any(|event| {
+                event.paths.iter().any(|path| {
+                    should_trigger_rebuild(path, &site_roots, &theme_dirs)
+                })
             });
+            if !relevant_change {
+                return;
+            }
+            let _ = rebuild_trigger_tx.send(());
         };
 
         let mut debouncer = match new_debouncer(Duration::from_millis(200), None, handler) {
-            Ok(d) => d,
+            Ok(debouncer) => debouncer,
             Err(err) => {
                 error!(?err, "failed to start file watcher debouncer");
                 return;
             }
         };
 
-        for path in paths {
+        for path in watch_paths {
             if let Err(err) = debouncer.watch(path.as_path(), RecursiveMode::Recursive) {
                 error!(path = %path.display(), ?err, "failed to watch path");
             }
@@ -124,10 +133,33 @@ pub async fn spawn_watcher(state: std::sync::Arc<AppState>) -> Result<()> {
     Ok(())
 }
 
-async fn rebuild_content(
-    state: &std::sync::Arc<AppState>,
-    config: &std::sync::Arc<Config>,
-) -> Result<()> {
+async fn rebuild_worker(
+    state_weak: std::sync::Weak<AppState>,
+    config: Arc<Config>,
+    reload_tx: broadcast::Sender<()>,
+    mut rebuild_trigger_rx: mpsc::UnboundedReceiver<()>,
+) {
+    while rebuild_trigger_rx.recv().await.is_some() {
+        loop {
+            while rebuild_trigger_rx.try_recv().is_ok() {}
+
+            let Some(state) = state_weak.upgrade() else {
+                return;
+            };
+            if let Err(err) = rebuild_content(&state, &config).await {
+                error!(?err, "failed to rebuild after file change");
+            } else {
+                let _ = reload_tx.send(());
+            }
+
+            if rebuild_trigger_rx.try_recv().is_err() {
+                break;
+            }
+        }
+    }
+}
+
+async fn rebuild_content(state: &Arc<AppState>, config: &Arc<Config>) -> Result<()> {
     let config = config.clone();
     let rebuild_result = tokio::task::spawn_blocking(move || {
         let theme = ThemeStack::from_config(config.as_ref())?;

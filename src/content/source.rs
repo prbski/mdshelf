@@ -59,10 +59,15 @@ pub(super) fn relative_path_has_hidden_component(relative: &Path) -> bool {
 }
 
 fn is_noise(entry: &DirEntry) -> bool {
-    let name = entry.file_name().to_string_lossy();
     if entry.depth() == 0 {
         return false;
     }
+    path_segment_is_noise(entry.file_name())
+}
+
+/// True when a single path segment is a dot-folder or common build/cache directory.
+pub fn path_segment_is_noise(segment: &std::ffi::OsStr) -> bool {
+    let name = segment.to_string_lossy();
     if name.starts_with('.') {
         return true;
     }
@@ -72,9 +77,92 @@ fn is_noise(entry: &DirEntry) -> bool {
     )
 }
 
-fn is_markdown(path: &Path) -> bool {
+/// True when any path segment is noise (e.g. `.git`, `target`, `node_modules`).
+pub fn path_has_noise_component(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(component, std::path::Component::Normal(segment) if path_segment_is_noise(segment))
+    })
+}
+
+pub fn is_markdown_path(path: &Path) -> bool {
     path.extension()
         .and_then(|s| s.to_str())
         .map(|ext| ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown"))
         .unwrap_or(false)
+}
+
+fn is_markdown(path: &Path) -> bool {
+    is_markdown_path(path)
+}
+
+/// True for theme template and asset files that should trigger a rebuild.
+pub fn is_theme_watch_path(path: &Path) -> bool {
+    let path_text = path.to_string_lossy().replace('\\', "/");
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    if path_text.contains("/layouts/") || path_text.contains("/partials/") {
+        return matches!(extension, "html" | "xml" | "txt");
+    }
+    if path_text.contains("/assets/") {
+        return matches!(
+            extension,
+            "css" | "js" | "woff" | "woff2" | "svg" | "png" | "jpg" | "jpeg" | "gif" | "webp"
+        );
+    }
+    false
+}
+
+/// Whether a filesystem event path should trigger a content rebuild.
+pub fn should_trigger_rebuild(
+    path: &Path,
+    site_roots: &[PathBuf],
+    theme_dirs: &[PathBuf],
+) -> bool {
+    if path_has_noise_component(path) {
+        return false;
+    }
+    if site_roots
+        .iter()
+        .any(|root| path.starts_with(root) && is_markdown_path(path))
+    {
+        return true;
+    }
+    theme_dirs
+        .iter()
+        .any(|dir| path.starts_with(dir) && is_theme_watch_path(path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ignores_build_artifact_paths() {
+        let site_root = PathBuf::from("/tmp/site");
+        let path = PathBuf::from("/tmp/site/target/debug/readme.md");
+        assert!(!should_trigger_rebuild(&path, &[site_root], &[]));
+    }
+
+    #[test]
+    fn accepts_markdown_in_site_root() {
+        let site_root = PathBuf::from("/tmp/site");
+        let path = PathBuf::from("/tmp/site/guide/readme.md");
+        assert!(should_trigger_rebuild(&path, &[site_root], &[]));
+    }
+
+    #[test]
+    fn ignores_non_markdown_site_files() {
+        let site_root = PathBuf::from("/tmp/site");
+        let path = PathBuf::from("/tmp/site/src/main.rs");
+        assert!(!should_trigger_rebuild(&path, &[site_root], &[]));
+    }
+
+    #[test]
+    fn accepts_theme_template_changes() {
+        let theme_dir = PathBuf::from("/tmp/theme");
+        let path = PathBuf::from("/tmp/theme/layouts/doc.html");
+        assert!(should_trigger_rebuild(&path, &[], &[theme_dir]));
+    }
 }
