@@ -101,8 +101,11 @@ pub async fn spawn_watcher(state: Arc<AppState>) -> Result<()> {
                 return;
             }
             let relevant_change = events.iter().any(|event| {
+                if event.need_rescan() {
+                    return true;
+                }
                 event.paths.iter().any(|path| {
-                    should_trigger_rebuild(path, &site_roots, &theme_dirs)
+                    should_trigger_rebuild(path, &event.kind, &site_roots, &theme_dirs)
                 })
             });
             if !relevant_change {

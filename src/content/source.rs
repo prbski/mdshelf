@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use notify::EventKind;
+use notify::event::ModifyKind;
 use tracing::warn;
 use walkdir::{DirEntry, WalkDir};
 
@@ -114,24 +116,40 @@ pub fn is_theme_watch_path(path: &Path) -> bool {
     false
 }
 
+fn is_under_site_root(path: &Path, site_roots: &[PathBuf]) -> bool {
+    site_roots.iter().any(|root| path.starts_with(root))
+}
+
+fn is_site_structure_event(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
+    )
+}
+
 /// Whether a filesystem event path should trigger a content rebuild.
 pub fn should_trigger_rebuild(
     path: &Path,
+    kind: &EventKind,
     site_roots: &[PathBuf],
     theme_dirs: &[PathBuf],
 ) -> bool {
     if path_has_noise_component(path) {
         return false;
     }
-    if site_roots
+    if theme_dirs
         .iter()
-        .any(|root| path.starts_with(root) && is_markdown_path(path))
+        .any(|dir| path.starts_with(dir) && is_theme_watch_path(path))
     {
         return true;
     }
-    theme_dirs
-        .iter()
-        .any(|dir| path.starts_with(dir) && is_theme_watch_path(path))
+    if !is_under_site_root(path, site_roots) {
+        return false;
+    }
+    if is_markdown_path(path) {
+        return true;
+    }
+    is_site_structure_event(kind)
 }
 
 #[cfg(test)]
@@ -142,27 +160,83 @@ mod tests {
     fn ignores_build_artifact_paths() {
         let site_root = PathBuf::from("/tmp/site");
         let path = PathBuf::from("/tmp/site/target/debug/readme.md");
-        assert!(!should_trigger_rebuild(&path, &[site_root], &[]));
+        assert!(!should_trigger_rebuild(
+            &path,
+            &EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Any)),
+            &[site_root],
+            &[]
+        ));
     }
 
     #[test]
     fn accepts_markdown_in_site_root() {
         let site_root = PathBuf::from("/tmp/site");
         let path = PathBuf::from("/tmp/site/guide/readme.md");
-        assert!(should_trigger_rebuild(&path, &[site_root], &[]));
+        assert!(should_trigger_rebuild(
+            &path,
+            &EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Any)),
+            &[site_root],
+            &[]
+        ));
     }
 
     #[test]
-    fn ignores_non_markdown_site_files() {
+    fn accepts_new_subfolder_creation() {
+        let site_root = PathBuf::from("/tmp/site");
+        let path = PathBuf::from("/tmp/site/guide");
+        assert!(should_trigger_rebuild(
+            &path,
+            &EventKind::Create(notify::event::CreateKind::Folder),
+            &[site_root],
+            &[]
+        ));
+    }
+
+    #[test]
+    fn accepts_subfolder_removal() {
+        let site_root = PathBuf::from("/tmp/site");
+        let path = PathBuf::from("/tmp/site/guide");
+        assert!(should_trigger_rebuild(
+            &path,
+            &EventKind::Remove(notify::event::RemoveKind::Folder),
+            &[site_root],
+            &[]
+        ));
+    }
+
+    #[test]
+    fn ignores_non_markdown_site_file_modifications() {
         let site_root = PathBuf::from("/tmp/site");
         let path = PathBuf::from("/tmp/site/src/main.rs");
-        assert!(!should_trigger_rebuild(&path, &[site_root], &[]));
+        assert!(!should_trigger_rebuild(
+            &path,
+            &EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Any)),
+            &[site_root],
+            &[]
+        ));
+    }
+
+    #[test]
+    fn accepts_non_markdown_site_file_creation() {
+        let site_root = PathBuf::from("/tmp/site");
+        let path = PathBuf::from("/tmp/site/logo.png");
+        assert!(should_trigger_rebuild(
+            &path,
+            &EventKind::Create(notify::event::CreateKind::File),
+            &[site_root],
+            &[]
+        ));
     }
 
     #[test]
     fn accepts_theme_template_changes() {
         let theme_dir = PathBuf::from("/tmp/theme");
         let path = PathBuf::from("/tmp/theme/layouts/doc.html");
-        assert!(should_trigger_rebuild(&path, &[], &[theme_dir]));
+        assert!(should_trigger_rebuild(
+            &path,
+            &EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Any)),
+            &[],
+            &[theme_dir]
+        ));
     }
 }
