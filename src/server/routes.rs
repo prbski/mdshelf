@@ -396,8 +396,7 @@ fn site_list_entries(universe: &Universe) -> Vec<SiteListEntry> {
 
 fn config_summary(state: &AppState) -> ConfigSummary {
     ConfigSummary {
-        host: state.config.host.clone(),
-        port: state.config.port,
+        version: env!("CARGO_PKG_VERSION").to_string(),
         theme_name: state.config.theme.name.clone(),
     }
 }

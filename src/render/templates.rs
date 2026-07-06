@@ -95,8 +95,7 @@ pub struct SiteListEntry {
 
 #[derive(Serialize, Clone)]
 pub struct ConfigSummary {
-    pub host: String,
-    pub port: u16,
+    pub version: String,
     pub theme_name: Option<String>,
 }
 
