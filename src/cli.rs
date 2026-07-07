@@ -39,6 +39,8 @@ pub enum Command {
     Init(InitArgs),
     /// Validate a config file and dry-run content discovery.
     Check(CheckArgs),
+    /// Export the site as a static bundle of HTML and CSS files.
+    Export(ExportArgs),
     /// Register `mdshelf` as a system service (launchd / systemd / Windows SCM).
     Install(ServiceArgs),
     /// Remove the registered system service.
@@ -96,6 +98,27 @@ pub struct CheckArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct ExportArgs {
+    /// Path to the TOML config file.
+    #[arg(short, long)]
+    pub config: Option<PathBuf>,
+
+    /// Output directory for the static bundle. Defaults to `./dist`.
+    #[arg(short, long, default_value = "dist")]
+    pub output: PathBuf,
+
+    /// Overwrite an existing output directory instead of erroring out.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Export only the site with this mount path or title (repeatable).
+    /// When exactly one site is selected, the bundle is written at the output
+    /// root without the mount prefix. Omit to export every configured site.
+    #[arg(long)]
+    pub site: Vec<String>,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct ServiceArgs {
     /// Path to the TOML config file the installed service will load.
     #[arg(short, long)]
@@ -139,6 +162,7 @@ impl Cli {
             Command::Serve(args) => crate::server::run(args).await,
             Command::Init(args) => init(args),
             Command::Check(args) => check(args),
+            Command::Export(args) => crate::export::run(args),
             Command::Install(args) => crate::service::install(args),
             Command::Uninstall(args) => crate::service::uninstall(args),
             Command::Start(args) => crate::service::start(args),

@@ -96,6 +96,32 @@ impl ThemeStack {
         Ok(by_name.into_values().collect())
     }
 
+    /// All theme asset paths (e.g. `assets/css/main.css`) from the embedded
+    /// default and optional global override directory.
+    pub fn list_asset_paths(&self) -> BTreeMap<String, ResolvedAsset> {
+        let mut by_path: BTreeMap<String, ResolvedAsset> = BTreeMap::new();
+        walk_embedded(&EMBEDDED_THEME, &mut |relative, file| {
+            if !relative.starts_with("assets/") {
+                return;
+            }
+            by_path.insert(
+                relative.to_string(),
+                ResolvedAsset {
+                    bytes: file.contents().to_vec(),
+                    on_disk: None,
+                },
+            );
+        });
+        if let Some(dir) = &self.global_override {
+            if let Ok(entries) = iter_dir_assets(dir) {
+                for (path, asset) in entries {
+                    by_path.insert(path, asset);
+                }
+            }
+        }
+        by_path
+    }
+
     /// Resolve a theme asset at `relative` (e.g. `assets/css/main.css`) for the
     /// given site mount. Layered: per-site -> global -> embedded.
     pub fn resolve_asset(&self, mount: Option<&str>, relative: &str) -> Option<ResolvedAsset> {
@@ -174,6 +200,34 @@ fn read_dir_asset(dir: &Path, relative: &str) -> Option<ResolvedAsset> {
         bytes,
         on_disk: Some(path),
     })
+}
+
+fn iter_dir_assets(dir: &Path) -> Result<BTreeMap<String, ResolvedAsset>> {
+    let mut out = BTreeMap::new();
+    for entry in WalkDir::new(dir).follow_links(true) {
+        let entry = entry.with_context(|| format!("walking {}", dir.display()))?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let rel = entry
+            .path()
+            .strip_prefix(dir)
+            .map_err(|_| anyhow!("path escaped theme dir"))?;
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if !rel_str.starts_with("assets/") {
+            continue;
+        }
+        let bytes = std::fs::read(entry.path())
+            .with_context(|| format!("reading asset {}", entry.path().display()))?;
+        out.insert(
+            rel_str,
+            ResolvedAsset {
+                bytes,
+                on_disk: Some(entry.path().to_path_buf()),
+            },
+        );
+    }
+    Ok(out)
 }
 
 fn read_embedded_asset(relative: &str) -> Option<ResolvedAsset> {

@@ -44,9 +44,47 @@ pub fn iter_markdown_files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
+/// Non-Markdown files in a site root (images, fonts, etc.) for static export.
+pub fn iter_site_static_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    for entry_result in WalkDir::new(root)
+        .follow_links(true)
+        .into_iter()
+        .filter_entry(|entry| !is_noise(entry))
+    {
+        let entry = match entry_result {
+            Ok(entry) => entry,
+            Err(walk_error) => {
+                warn!(
+                    error = %walk_error,
+                    root = %root.display(),
+                    "skipping path while scanning static files"
+                );
+                continue;
+            }
+        };
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if is_markdown(entry.path()) {
+            continue;
+        }
+        let rel = entry
+            .path()
+            .strip_prefix(root)
+            .with_context(|| format!("stripping prefix {}", root.display()))?;
+        if relative_path_has_hidden_component(rel.as_ref()) {
+            continue;
+        }
+        out.push(rel.to_path_buf());
+    }
+    out.sort();
+    Ok(out)
+}
+
 /// True if any normal path segment starts with `.` (e.g. `.git`, `.cursor`).
 /// Used so symlinked trees cannot pull tool or VCS folders into the site.
-pub(super) fn relative_path_has_hidden_component(relative: &Path) -> bool {
+pub fn relative_path_has_hidden_component(relative: &Path) -> bool {
     for component in relative.components() {
         if let std::path::Component::Normal(part) = component {
             if part

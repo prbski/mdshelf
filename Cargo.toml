@@ -1,6 +1,6 @@
 [package]
 name = "mdshelf"
-version = "1.0.6"
+version = "1.0.7"
 edition = "2024"
 description = "A Rust web server that serves folders of markdown files as websites."
 repository = "https://github.com/prbski/mdshelf"

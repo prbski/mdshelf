@@ -114,6 +114,7 @@ Open `http://127.0.0.1:4444/` for the site index.
 | `mdshelf init [dir]` | Scaffold config and sample content |
 | `mdshelf serve` | Start the web server |
 | `mdshelf check` | Validate config and scan content |
+| `mdshelf export` | Export a static bundle of HTML and CSS files |
 | `mdshelf install` | Register as a native system service |
 | `mdshelf start` | Start the installed service |
 | `mdshelf stop` | Stop the installed service |
@@ -253,6 +254,17 @@ The site becomes accessible at the same `*.ts.net` URL from anywhere, without an
 ```bash
 tailscale funnel off
 ```
+
+### Static export
+
+```bash
+mdshelf export                          # all sites → ./dist
+mdshelf export --site docs              # one site, flat at output root
+mdshelf export --site docs --site notes # selected sites, mount prefixes kept
+mdshelf export -o ./build --force       # overwrite existing output
+```
+
+Use `--site` with a mount path (`docs`, `/docs`) or site title. Exporting exactly one site writes a standalone bundle at the output root (no mount prefix). Exporting multiple sites keeps each under its mount path and skips the multi-site home page.
 
 ## Logging
 
