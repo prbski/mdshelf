@@ -154,8 +154,10 @@ pub fn is_theme_watch_path(path: &Path) -> bool {
     false
 }
 
-fn is_under_site_root(path: &Path, site_roots: &[PathBuf]) -> bool {
-    site_roots.iter().any(|root| path.starts_with(root))
+fn relative_path_has_noise_within_root(path: &Path, root: &Path) -> bool {
+    path.strip_prefix(root)
+        .ok()
+        .is_some_and(|relative| path_has_noise_component(relative))
 }
 
 fn is_site_structure_event(kind: &EventKind) -> bool {
@@ -172,16 +174,17 @@ pub fn should_trigger_rebuild(
     site_roots: &[PathBuf],
     theme_dirs: &[PathBuf],
 ) -> bool {
-    if path_has_noise_component(path) {
-        return false;
-    }
-    if theme_dirs
-        .iter()
-        .any(|dir| path.starts_with(dir) && is_theme_watch_path(path))
-    {
+    if theme_dirs.iter().any(|dir| {
+        path.starts_with(dir)
+            && !relative_path_has_noise_within_root(path, dir)
+            && is_theme_watch_path(path)
+    }) {
         return true;
     }
-    if !is_under_site_root(path, site_roots) {
+    let Some(site_root) = site_roots.iter().find(|root| path.starts_with(root)) else {
+        return false;
+    };
+    if relative_path_has_noise_within_root(path, site_root) {
         return false;
     }
     if is_markdown_path(path) {
@@ -275,6 +278,30 @@ mod tests {
             &EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Any)),
             &[],
             &[theme_dir]
+        ));
+    }
+
+    #[test]
+    fn accepts_markdown_under_dot_parent_directory() {
+        let site_root = PathBuf::from("/Users/patryk/.config/mdshelf/content");
+        let path = PathBuf::from("/Users/patryk/.config/mdshelf/content/guide/readme.md");
+        assert!(should_trigger_rebuild(
+            &path,
+            &EventKind::Create(notify::event::CreateKind::File),
+            &[site_root],
+            &[]
+        ));
+    }
+
+    #[test]
+    fn accepts_new_markdown_file_creation() {
+        let site_root = PathBuf::from("/tmp/site");
+        let path = PathBuf::from("/tmp/site/new-page.md");
+        assert!(should_trigger_rebuild(
+            &path,
+            &EventKind::Create(notify::event::CreateKind::File),
+            &[site_root],
+            &[]
         ));
     }
 }
