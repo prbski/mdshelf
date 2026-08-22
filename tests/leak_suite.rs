@@ -776,6 +776,156 @@ fn export_rejects_an_invalid_viewer_address() {
 }
 
 // ---------------------------------------------------------------------------
+// The per-viewer view cache (D12)
+// ---------------------------------------------------------------------------
+
+/// Views are cached per ACL signature and shared between viewers with identical
+/// access. That sharing is the whole point, and also the thing that would be worst to
+/// get wrong: one viewer served another's projection would be a total failure of the
+/// model rather than a leak at the edges.
+///
+/// Interleaves several viewers with overlapping access over repeated rounds. Each must
+/// see exactly their own set, every time, and never another viewer's content.
+#[tokio::test]
+async fn the_view_cache_never_serves_one_viewer_anothers_projection() {
+    const CACHE_VAULT: &[(&str, &str)] = &[
+        (
+            "index.md",
+            "---\ntitle: Root\nallow:\n  - everyone@corp.com\n---\n\n# Root\n",
+        ),
+        (
+            "a/index.md",
+            "---\ntitle: A\nallow:\n  - a@corp.com\ndeny:\n  - everyone@corp.com\n---\n\n# ZZAZZ\n",
+        ),
+        (
+            "b/index.md",
+            "---\ntitle: B\nallow:\n  - b@corp.com\ndeny:\n  - everyone@corp.com\n---\n\n# ZZBZZ\n",
+        ),
+        (
+            "c/index.md",
+            "---\ntitle: C\nallow:\n  - a@corp.com\n  - b@corp.com\ndeny:\n  - everyone@corp.com\n---\n\n# ZZCZZ\n",
+        ),
+        ("shared.md", "---\ntitle: Shared\n---\n\n# ZZSHAREDZZ\n"),
+    ];
+
+    let idp = MockIdp::start().await;
+    let server = TestServer::start_with_auth(CACHE_VAULT, &idp).await;
+
+    // A viewer denied the root index but granted pages beneath it still gets a
+    // generated listing — of their own pages only — rather than a dead end.
+    let matrix: &[(&str, &str, u16)] = &[
+        ("a@corp.com", "/docs/a", 200),
+        ("a@corp.com", "/docs/b", 404),
+        ("a@corp.com", "/docs/c", 200),
+        ("a@corp.com", "/docs", 200),
+        ("b@corp.com", "/docs/a", 404),
+        ("b@corp.com", "/docs/b", 200),
+        ("b@corp.com", "/docs/c", 200),
+        ("b@corp.com", "/docs", 200),
+        ("everyone@corp.com", "/docs/a", 404),
+        ("everyone@corp.com", "/docs/b", 404),
+        ("everyone@corp.com", "/docs/c", 404),
+        ("everyone@corp.com", "/docs/shared", 200),
+        // An empty projection is a dead end, and must look like one.
+        ("nobody@corp.com", "/docs", 404),
+        ("nobody@corp.com", "/docs/a", 404),
+    ];
+
+    let mut cookies = HashMap::new();
+    for email in [
+        "a@corp.com",
+        "b@corp.com",
+        "everyone@corp.com",
+        "nobody@corp.com",
+    ] {
+        cookies.insert(email, sign_in(&server, &idp, email).await);
+    }
+
+    let permitted: HashMap<&str, &str> = HashMap::from([
+        ("/docs/a", "ZZAZZ"),
+        ("/docs/b", "ZZBZZ"),
+        ("/docs/c", "ZZCZZ"),
+        ("/docs/shared", "ZZSHAREDZZ"),
+    ]);
+
+    for round in 0..8 {
+        let mut handles = Vec::new();
+        for (email, path, expected) in matrix {
+            let cookie = cookies[email].clone();
+            let (email, path, expected) = (email.to_string(), path.to_string(), *expected);
+            let base = server.base_url.clone();
+            handles.push(tokio::spawn(async move {
+                let response = client()
+                    .get(format!("{base}{path}"))
+                    .header(
+                        reqwest::header::COOKIE,
+                        format!("{SESSION_COOKIE}={cookie}"),
+                    )
+                    .send()
+                    .await
+                    .expect("request");
+                let status = response.status().as_u16();
+                let body = response.text().await.expect("body");
+                (email, path, expected, status, body)
+            }));
+        }
+
+        for handle in handles {
+            let (email, path, expected, status, body) = handle.await.expect("task");
+            assert_eq!(status, expected, "round {round}: {email} {path}");
+
+            // Whatever the outcome, no other viewer's content may be present.
+            let allowed = permitted.get(path.as_str()).copied().unwrap_or("");
+            for secret in ["ZZAZZ", "ZZBZZ", "ZZCZZ"] {
+                if secret == allowed && status == 200 {
+                    continue;
+                }
+                assert!(
+                    !body.contains(secret),
+                    "round {round}: {email} received {secret} from {path}"
+                );
+            }
+        }
+    }
+}
+
+/// A warm cache must not survive a rule change.
+///
+/// The cache lives on `Site`, and a rebuild replaces the whole `Universe`, so this
+/// holds by construction — but "by construction" is exactly the kind of claim that
+/// quietly stops being true, and instant revocation (D3) depends on it.
+#[tokio::test]
+async fn a_warm_view_cache_does_not_outlive_the_rule_that_filled_it() {
+    let idp = MockIdp::start().await;
+    let server = TestServer::start_with_auth(VAULT, &idp).await;
+    let hr = sign_in(&server, &idp, "hr@corp.com").await;
+
+    // Warm the cache: two reads, so the view is definitely cached rather than rebuilt.
+    for _ in 0..2 {
+        assert_eq!(
+            get_as(&server, &hr, "/docs/hr/salaries").await.status(),
+            200
+        );
+    }
+
+    // Revoke by editing the folder's index, exactly as an owner would.
+    server
+        .write_and_rebuild(
+            "hr/index.md",
+            "---\ntitle: People Ops\nallow: []\ndeny:\n  - team@corp.com\n---\n\n# People Ops\n",
+        )
+        .await;
+
+    let response = get_as(&server, &hr, "/docs/hr/salaries").await;
+    assert_eq!(
+        response.status(),
+        404,
+        "D3: a cached view must not keep serving a revoked reader"
+    );
+    assert!(!response.text().await.expect("body").contains(SECRET_BODY));
+}
+
+// ---------------------------------------------------------------------------
 // Multi-site: one server, several vaults, different audiences
 // ---------------------------------------------------------------------------
 
