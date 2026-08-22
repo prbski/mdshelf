@@ -11,19 +11,20 @@ use crate::auth::crypto::signature_digest;
 use super::resolver::{Candidate, Level, Resolution, resolve};
 use super::{AclBlock, AclError};
 
-/// Index filenames whose rules govern their whole folder (D7/D8).
-const INDEX_STEMS: [&str; 2] = ["index", "readme"];
-
-/// True when `rel_path` is a folder's index file.
+/// True when `rel_path` is a folder's index file, and therefore governs that folder
+/// and everything beneath it (D7/D8).
+///
+/// Delegates to mdshelf's own notion of an index page rather than re-deriving it. An
+/// independent definition drifted, with real consequences: it counted `readme.md` and
+/// `index.markdown` as folder indexes when mdshelf serves both as ordinary pages. An
+/// author granting access to one such file was silently granting the whole folder —
+/// a `deny` on a sibling would not save them, because the widened rule sits at folder
+/// level.
+///
+/// US-10 says as much: README is an index "where mdshelf already treats it as one".
+/// Asking mdshelf is the only way to keep that true.
 pub fn is_index_file(rel_path: &Path) -> bool {
-    rel_path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .is_some_and(|stem| {
-            INDEX_STEMS
-                .iter()
-                .any(|candidate| stem.eq_ignore_ascii_case(candidate))
-        })
+    crate::content::page::url_path_from_rel(rel_path).1
 }
 
 /// The folder a relative path sits in, as a `/`-joined string ("" for the site root).
@@ -258,13 +259,23 @@ mod tests {
     }
 
     #[test]
-    fn identifies_index_files() {
+    fn identifies_index_files_exactly_as_mdshelf_does() {
         assert!(is_index_file(&path("index.md")));
         assert!(is_index_file(&path("hr/index.md")));
-        assert!(is_index_file(&path("hr/README.md")));
-        assert!(is_index_file(&path("hr/readme.md")));
+        assert!(
+            is_index_file(&path("hr/INDEX.md")),
+            "the stem is case-insensitive"
+        );
+
         assert!(!is_index_file(&path("hr/comp.md")));
         assert!(!is_index_file(&path("hr/indexes.md")));
+
+        // These are ordinary pages to mdshelf — `hr/readme.md` is served at `hr/readme`,
+        // not as the folder's landing page. Treating them as folder indexes turned a
+        // rule meant for one file into a rule over the whole subtree.
+        assert!(!is_index_file(&path("hr/README.md")));
+        assert!(!is_index_file(&path("hr/readme.md")));
+        assert!(!is_index_file(&path("hr/index.markdown")));
     }
 
     #[test]
@@ -339,11 +350,25 @@ mod tests {
         assert!(index.is_empty(), "a rule-free vault must stay rule-free");
     }
 
+    /// A rule in a file mdshelf serves as an ordinary page governs that page only.
+    ///
+    /// `readme.md` and `index.markdown` previously widened to the whole folder, so
+    /// granting one person one file quietly granted them everything beside it.
     #[test]
-    fn readme_acts_as_a_folder_index() {
-        let mut index = AclIndex::new();
-        index.insert(&path("hr/README.md"), block(&["hr@corp.com"], &[]));
-        assert!(index.allows(&path("hr/policy.md"), "hr@corp.com"));
+    fn a_non_index_file_governs_only_itself() {
+        for carrier in ["hr/README.md", "hr/index.markdown"] {
+            let mut index = AclIndex::new();
+            index.insert(&path(carrier), block(&["contractor@corp.com"], &[]));
+
+            assert!(
+                index.allows(&path(carrier), "contractor@corp.com"),
+                "{carrier} should still govern itself"
+            );
+            assert!(
+                !index.allows(&path("hr/policy.md"), "contractor@corp.com"),
+                "{carrier} must not widen access to its whole folder"
+            );
+        }
     }
 
     #[test]

@@ -209,17 +209,21 @@ Rules exist at three levels:
 | Where | Governs |
 |---|---|
 | Any `.md` file | That file alone |
-| A folder's `index.md` (or `README.md`) | **That folder, everything beneath it, and the index page itself** |
+| A folder's `index.md` | **That folder, everything beneath it, and the index page itself** |
 | The vault root's `index.md` | The whole site |
 
 Both keys take a **list**. A bare string is an error, not a one-element list — so the
 common typo `allow: a@x.com, b@y.com` is rejected rather than quietly granting access
 to one malformed address.
 
+Only `index.md` governs a folder. `readme.md` and `index.markdown` are ordinary pages to
+mdshelf — served at `/readme` and `/index.markdown` — so a rule in one of them applies to
+that page alone, not to everything beside it.
+
 ### How a decision is reached
 
-1. Collect every rule that applies: the file's own, then each ancestor folder's index
-   from nearest to furthest, then the site root.
+1. Collect every rule that applies: the file's own, then each ancestor folder's
+   `index.md` from nearest to furthest, then the site root.
 2. The most specific level that **names the address** decides. A `deny` there beats an
    inherited `allow`, and an `allow` there beats an inherited `deny`.
 3. If no level names the address, the answer is **deny**.
