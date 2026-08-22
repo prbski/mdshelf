@@ -104,6 +104,15 @@ impl Site {
             .with_context(|| format!("scanning site root {}", root.display()))?;
 
         let mut pages = BTreeMap::new();
+        // Rules are collected per *file on disk*, not per rendered page.
+        //
+        // The pages map is a presentation structure: it is keyed by URL, so two files
+        // that resolve to the same URL collapse into one, and a file that fails to load
+        // disappears from it entirely. Neither of those may take a rule with it —
+        // `hr.md` shadowing `hr/index.md` used to silently discard that folder's `deny`,
+        // leaving its whole subtree governed by whatever a broader rule granted.
+        let mut rules: Vec<(PathBuf, crate::acl::AclBlock)> = Vec::new();
+
         for rel in rels {
             if source::relative_path_has_hidden_component(rel.as_path()) {
                 continue;
@@ -117,15 +126,33 @@ impl Site {
                         error = %load_error,
                         "skipping markdown file (read error or invalid front matter)"
                     );
+                    // A file mdshelf cannot read may still be a rule file. Treating it
+                    // as absent would let a broken `hr/index.md` open its whole subtree,
+                    // so it is recorded as poisoned instead: unreadable means deny (D10).
+                    rules.push((
+                        rel.clone(),
+                        crate::acl::AclBlock {
+                            allow: Vec::new(),
+                            deny: Vec::new(),
+                            errors: vec![crate::acl::AclError {
+                                key: "frontmatter".to_string(),
+                                message: format!("this file could not be read: {load_error}"),
+                                line: None,
+                            }],
+                        },
+                    ));
                     continue;
                 }
             };
+            rules.push((rel.clone(), page.acl.clone()));
+
             if let Some(replaced_page) = pages.insert(page.url_path.clone(), page) {
                 warn!(
                     url_path = %replaced_page.url_path,
                     kept = %absolute_path.display(),
                     dropped = %replaced_page.fs_path.display(),
-                    "duplicate url_path for this site; keeping the later file in scan order"
+                    "duplicate url_path for this site; keeping the later file in scan order \
+                     (both files' access rules remain in force)"
                 );
             }
         }
@@ -139,13 +166,13 @@ impl Site {
         });
 
         let mut acl = AclIndex::new();
-        for page in pages.values() {
-            if page.acl.is_poisoned() {
-                for error in &page.acl.errors {
+        for (rel_path, block) in rules {
+            if block.is_poisoned() {
+                for error in &block.errors {
                     // D10: loud, and with enough detail to fix it. The page stays
                     // loaded but now denies everyone.
                     error!(
-                        path = %page.rel_path.display(),
+                        path = %rel_path.display(),
                         line = error.line.unwrap_or(0),
                         key = %error.key,
                         "invalid access rule: {}; this file is now unreadable by everyone",
@@ -153,7 +180,7 @@ impl Site {
                     );
                 }
             }
-            acl.insert(&page.rel_path, page.acl.clone());
+            acl.insert(&rel_path, block);
         }
 
         Ok(Self {

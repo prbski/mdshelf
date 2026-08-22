@@ -148,6 +148,100 @@ async fn a_malformed_rule_block_denies_everyone_named_in_it() {
     assert_eq!(poisoned[0].1.line, Some(3));
 }
 
+/// Regression: rules were collected from the rendered-page map, not from disk.
+///
+/// `hr.md` and `hr/index.md` both resolve to the URL `hr`, so the pages map — which is
+/// keyed by URL — kept only one of them. Because the rule index was built from that
+/// map, the loser's rules disappeared: a folder index's `deny` silently stopped
+/// applying and its whole subtree fell back to whatever a broader rule granted.
+///
+/// A **fail-open**, and the second of that shape. The pages map is a presentation
+/// structure; rules must come from every rule file that exists.
+#[tokio::test]
+async fn a_url_collision_does_not_discard_a_folder_rule() {
+    let idp = MockIdp::start().await;
+    let server = TestServer::start_with_auth(
+        &[
+            (
+                "index.md",
+                "---\ntitle: Home\nallow:\n  - team@corp.com\n---\n\n# Home\n",
+            ),
+            // Collides with hr/index.md on the URL `hr`.
+            ("hr.md", "---\ntitle: HR overview\n---\n\n# Overview\n"),
+            (
+                "hr/index.md",
+                "---\ntitle: HR\ndeny:\n  - team@corp.com\n---\n\n# HR\n",
+            ),
+            ("hr/secret.md", "---\ntitle: Secret\n---\n\n# ZZSECRETZZ\n"),
+        ],
+        &idp,
+    )
+    .await;
+
+    let universe = server.state.universe.read().await;
+    let acl = universe.sites()[0].acl();
+
+    assert!(
+        !acl.allows(Path::new("hr/secret.md"), "team@corp.com"),
+        "the folder deny must survive a URL collision"
+    );
+    assert!(
+        acl.rows()
+            .iter()
+            .any(|row| row.level == "folder" && row.path == "hr"),
+        "the shadowed folder's rule is missing from the index: {:?}",
+        acl.rows()
+    );
+}
+
+/// The same principle for a file mdshelf cannot parse at all.
+///
+/// A rule block that fails *mdshelf's* validation was already poisoned (D10), but one
+/// that fails the underlying YAML parser made the whole file vanish from the page map —
+/// taking its rules with it. An unparseable `hr/index.md` therefore opened its subtree.
+/// Unreadable must mean denied, not absent.
+#[tokio::test]
+async fn a_rule_file_that_cannot_be_parsed_denies_its_subtree() {
+    let idp = MockIdp::start().await;
+    let server = TestServer::start_with_auth(
+        &[
+            (
+                "index.md",
+                "---\ntitle: Home\nallow:\n  - team@corp.com\n---\n\n# Home\n",
+            ),
+            // Unclosed flow sequence: not valid YAML.
+            (
+                "hr/index.md",
+                "---\ntitle: HR\ndeny: [team@corp.com\n---\n\n# HR\n",
+            ),
+            ("hr/secret.md", "---\ntitle: Secret\n---\n\n# ZZSECRETZZ\n"),
+            // Tabs are illegal for YAML indentation.
+            (
+                "legal/index.md",
+                "---\ntitle: Legal\ndeny:\n\t- team@corp.com\n---\n\n# Legal\n",
+            ),
+            ("legal/brief.md", "---\ntitle: Brief\n---\n\n# ZZBRIEFZZ\n"),
+        ],
+        &idp,
+    )
+    .await;
+
+    let universe = server.state.universe.read().await;
+    let acl = universe.sites()[0].acl();
+
+    for page in ["hr/secret.md", "legal/brief.md"] {
+        assert!(
+            !acl.allows(Path::new(page), "team@corp.com"),
+            "{page} was reachable despite an unparseable folder index"
+        );
+    }
+
+    // And the operator is told which files to fix, rather than left guessing.
+    let reported: Vec<&str> = acl.poisoned().iter().map(|(file, _)| *file).collect();
+    assert!(reported.contains(&"hr/index.md"), "got: {reported:?}");
+    assert!(reported.contains(&"legal/index.md"), "got: {reported:?}");
+}
+
 // ---------------------------------------------------------------------------
 // US-12: an edit takes effect immediately
 // ---------------------------------------------------------------------------
