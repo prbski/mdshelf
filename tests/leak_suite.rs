@@ -775,6 +775,99 @@ fn export_rejects_an_invalid_viewer_address() {
     );
 }
 
+/// US-16: "Prev/next links never point at a page the viewer cannot read."
+///
+/// This existed only as a doc comment until an audit of the spec's acceptance criteria
+/// found it had never been asserted. It holds — prev/next is computed from the viewer's
+/// filtered page map — but a navigation link is exactly the kind of surface that would
+/// quietly regress.
+#[tokio::test]
+async fn prev_next_links_skip_pages_the_viewer_cannot_read() {
+    let vault: &[(&str, &str)] = &[
+        (
+            "index.md",
+            "---\ntitle: Home\nallow:\n  - team@corp.com\n---\n\n# Home\n",
+        ),
+        (
+            "a-first.md",
+            "---\ntitle: First\nsidebar_order: 1\n---\n\n# First\n",
+        ),
+        // The middle sibling in reading order, denied to team@.
+        (
+            "b-middle.md",
+            "---\ntitle: MIDDLESECRET\nsidebar_order: 2\ndeny:\n  - team@corp.com\n---\n\n# ZZMIDZZ\n",
+        ),
+        (
+            "c-last.md",
+            "---\ntitle: Last\nsidebar_order: 3\n---\n\n# Last\n",
+        ),
+    ];
+
+    let idp = MockIdp::start().await;
+    let server = TestServer::start_with_auth(vault, &idp).await;
+    let team = sign_in(&server, &idp, "team@corp.com").await;
+
+    for path in ["/docs/a-first", "/docs/c-last"] {
+        let body = get_as(&server, &team, path)
+            .await
+            .text()
+            .await
+            .expect("body");
+        for trace in ["MIDDLESECRET", "b-middle", "ZZMIDZZ"] {
+            assert!(
+                !body.contains(trace),
+                "{path} exposed the denied neighbour via {trace}"
+            );
+        }
+    }
+
+    // The neighbour is genuinely unreachable, not merely unlinked.
+    assert_eq!(get_as(&server, &team, "/docs/b-middle").await.status(), 404);
+}
+
+/// US-18: "Theme assets remain publicly served, since they contain no vault content."
+///
+/// Also untested until the criteria audit. Worth pinning in both directions: these
+/// routes must stay open (or every page breaks for signed-out visitors mid-load) and
+/// must never grow the ability to serve vault content.
+#[tokio::test]
+async fn theme_assets_stay_public_and_carry_no_vault_content() {
+    let idp = MockIdp::start().await;
+    let server = TestServer::start_with_auth(VAULT, &idp).await;
+    let http = client();
+
+    for path in ["/__assets/css/main.css", "/__mdshelf/syntax.css"] {
+        let response = http.get(server.url(path)).send().await.expect("request");
+        assert_eq!(
+            response.status(),
+            200,
+            "{path} must stay reachable without a session"
+        );
+        let body = response.text().await.expect("body");
+        for secret in [SECRET_TITLE, SECRET_BODY, SECRET_SLUG] {
+            assert!(!body.contains(secret), "{path} carried vault content");
+        }
+    }
+
+    // The asset route must not double as a way out of the theme into the vault.
+    for escape in [
+        "/__assets/../../../etc/passwd",
+        "/__assets/css/../../../../hr/salaries.md",
+    ] {
+        let response = http.get(server.url(escape)).send().await.expect("request");
+        let status = response.status();
+        let body = response.text().await.expect("body");
+        assert!(
+            !body.contains("root:"),
+            "{escape} escaped the theme ({status})"
+        );
+        assert!(
+            !body.contains(SECRET_BODY),
+            "{escape} reached vault content"
+        );
+    }
+}
+
 /// Regression: a UTF-8 byte-order mark silently disabled a file's access rules.
 ///
 /// Notepad and older PowerShell write a BOM by default and it is invisible in every

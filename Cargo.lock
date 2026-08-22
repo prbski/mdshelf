@@ -2133,6 +2133,7 @@ dependencies = [
  "rcgen 0.14.9",
  "reqwest",
  "rusqlite",
+ "rustls",
  "rustls-acme",
  "serde",
  "serde_json",

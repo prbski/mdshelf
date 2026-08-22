@@ -174,8 +174,28 @@ fn default_acme_cache() -> Result<PathBuf> {
         .join("acme"))
 }
 
+/// Select the process-wide rustls crypto provider.
+///
+/// Two providers reach the dependency graph — `aws-lc-rs` through reqwest's TLS client
+/// and `ring` through the ACME stack — and rustls refuses to guess between them. Left
+/// unresolved it does not fail politely: building a server `ServerConfig` **panics**, so
+/// `--tls-cert` and `--domain` would abort the process instead of serving.
+///
+/// `ring` is chosen deliberately: it is pure Rust, so it cross-compiles to every target
+/// in `dist-workspace.toml` without a C toolchain (NFR-5).
+///
+/// Idempotent, and safe to call from anywhere that might terminate TLS.
+pub fn install_crypto_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // An error here means something already installed a provider, which is fine.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 /// Serve `router` under the resolved TLS mode.
 pub async fn serve(mode: TlsMode, address: SocketAddr, router: axum::Router) -> Result<()> {
+    install_crypto_provider();
     match mode {
         TlsMode::Plain | TlsMode::BehindProxy => {
             let listener = tokio::net::TcpListener::bind(address).await?;
