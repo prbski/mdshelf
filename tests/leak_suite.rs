@@ -383,6 +383,51 @@ async fn raw_markdown_is_gated_like_the_rendered_page() {
     assert!(!response.text().await.expect("body").contains(SECRET_BODY));
 }
 
+/// Regression: a case-variant path must not bypass a folder rule.
+///
+/// macOS and Windows have case-insensitive filesystems, so a request for
+/// `HR/chart.png` opens `hr/chart.png`. Authorizing the *request string* looked up a
+/// folder named `HR`, missed the rule on `hr`, and fell through to the broader
+/// site-level grant — serving restricted bytes to a viewer that folder explicitly
+/// denies. Both attachments and raw markdown were affected. The fix authorizes the
+/// canonicalized path the filesystem resolved, not the string the client sent.
+#[tokio::test]
+async fn case_variant_paths_do_not_bypass_a_folder_rule() {
+    let idp = MockIdp::start().await;
+    let server = TestServer::start_with_auth(VAULT, &idp).await;
+    // team@ is denied /hr by hr/index.md, but granted the site root.
+    let team = sign_in(&server, &idp, "team@corp.com").await;
+
+    for path in [
+        "/docs/hr/salaries",
+        "/docs/HR/salaries",
+        "/docs/Hr/Salaries",
+        "/docs/hr/salaries.md",
+        "/docs/HR/salaries.md",
+        "/docs/Hr/salaries.MD",
+        "/docs/hr/chart.png",
+        "/docs/HR/chart.png",
+        "/docs/hr/CHART.PNG",
+        "/docs/HR/CHART.PNG",
+    ] {
+        let response = get_as(&server, &team, path).await;
+        let status = response.status();
+        let body = response.text().await.expect("body");
+        assert_eq!(status, 404, "{path} should be denied, got {status}");
+        assert!(
+            !body.contains(SECRET_BODY) && !body.contains(SECRET_TITLE),
+            "{path} leaked restricted content through a case variant"
+        );
+    }
+
+    // The fix must not over-block: the person who may read the folder still can,
+    // including through a case variant of the same file.
+    let hr = sign_in(&server, &idp, "hr@corp.com").await;
+    let response = get_as(&server, &hr, "/docs/hr/chart.png").await;
+    assert_eq!(response.status(), 200);
+    assert!(response.text().await.expect("body").contains(SECRET_BODY));
+}
+
 #[tokio::test]
 async fn path_traversal_cannot_escape_the_vault() {
     let idp = MockIdp::start().await;

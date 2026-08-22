@@ -516,15 +516,30 @@ fn strip_md_url_suffix(rel: &str) -> String {
         .unwrap_or_else(|| rel.to_string())
 }
 
-/// Resolve a static file, returning both its absolute path and the site-relative path
-/// the ACL is evaluated against.
+/// Resolve a static file, returning its absolute path and the site-relative path the
+/// ACL must be evaluated against.
+///
+/// The returned relative path comes from the *canonicalized* file, not from the request
+/// string. On a case-insensitive filesystem (macOS, Windows) a request for
+/// `HR/chart.png` opens `hr/chart.png` quite happily, and authorizing the request string
+/// would look up a folder named `HR` — miss the rule on `hr`, and fall through to
+/// whatever broader rule applies. Authorizing the path the filesystem actually resolved
+/// closes that, and closes symlink escapes at the same time.
 fn resolve_static_file(site: &Site, normalized: &str) -> Option<(PathBuf, PathBuf)> {
     let rel = safe_relative_path(normalized)?;
     let full = site.root.join(&rel);
-    if full.is_file() {
-        return Some((full, rel));
+    if !full.is_file() {
+        return None;
     }
-    None
+
+    let canonical_root = site.root.canonicalize().ok()?;
+    let canonical_file = full.canonicalize().ok()?;
+
+    // A file that canonicalizes outside the site root was reached through a symlink
+    // pointing out of the vault. There is no rule that could sensibly govern it.
+    let true_rel = canonical_file.strip_prefix(&canonical_root).ok()?;
+
+    Some((canonical_file.clone(), true_rel.to_path_buf()))
 }
 
 fn normalize_tail(tail: &str) -> String {

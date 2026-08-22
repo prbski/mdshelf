@@ -443,14 +443,51 @@ mod tests {
 
     #[test]
     fn missing_credentials_name_the_variable_and_the_docs() {
-        // No test sets these, so the failure path is the one exercised here (US-1).
-        let error = match Credentials::from_env() {
-            Ok(_) => panic!("the test environment must not carry real Google credentials"),
-            Err(error) => error.to_string(),
-        };
-        assert!(error.contains(CLIENT_ID_ENV), "got: {error}");
+        // Exercises the lookup directly with a name nothing sets and no stored file.
+        //
+        // Deliberately not `Credentials::from_env()`: that consults the real
+        // ~/.config/mdshelf/credentials.env, so on a machine where somebody has run
+        // `mdshelf auth setup` it would find live credentials and the test would
+        // report a pass or failure based on the developer's home directory (US-1).
+        let error = env_or("MDSHELF_DEFINITELY_NOT_SET_IN_ANY_ENVIRONMENT", None)
+            .expect_err("an unset variable with no stored fallback must be an error")
+            .to_string();
+
+        assert!(error.contains("MDSHELF_DEFINITELY_NOT_SET_IN_ANY_ENVIRONMENT"));
         assert!(error.contains(DOCS_URL), "got: {error}");
         assert!(error.contains("mdshelf auth setup"), "got: {error}");
+    }
+
+    #[test]
+    fn a_stored_credentials_file_satisfies_the_lookup() {
+        let mut stored = HashMap::new();
+        stored.insert(CLIENT_ID_ENV.to_string(), "id-from-file".to_string());
+        assert_eq!(
+            env_or(CLIENT_ID_ENV, Some(&stored)).unwrap(),
+            "id-from-file"
+        );
+
+        // A blank value in the file is treated as absent rather than accepted.
+        let mut blank = HashMap::new();
+        blank.insert(CLIENT_ID_ENV.to_string(), "   ".to_string());
+        assert!(env_or("MDSHELF_ALSO_NOT_SET_ANYWHERE", Some(&blank)).is_err());
+    }
+
+    #[test]
+    fn env_file_parsing_ignores_comments_and_blanks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.env");
+        std::fs::write(
+            &path,
+            "# a comment\n\n  MDSHELF_GOOGLE_CLIENT_ID = id-value \n\
+             MDSHELF_GOOGLE_CLIENT_SECRET=\"quoted-secret\"\nnot-a-pair\n",
+        )
+        .unwrap();
+
+        let values = read_env_file(&path).expect("file parses");
+        assert_eq!(values.get(CLIENT_ID_ENV).unwrap(), "id-value");
+        assert_eq!(values.get(CLIENT_SECRET_ENV).unwrap(), "quoted-secret");
+        assert!(!values.contains_key("not-a-pair"));
     }
 
     #[test]
