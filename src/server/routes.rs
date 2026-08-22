@@ -497,27 +497,9 @@ async fn serve_site_request(
 }
 
 fn resolve_markdown_page<'a>(view: &'a SiteView, normalized: &str) -> Option<&'a Page> {
-    let rel = normalized.trim_matches('/');
-    if rel.is_empty() {
-        return view.page("");
-    }
-    let rel_lower = rel.to_ascii_lowercase();
-    if rel_lower.ends_with(".md") {
-        let key = strip_md_url_suffix(rel);
-        return view.page(&key);
-    }
-    if let Some(page) = view.page(rel) {
-        return Some(page);
-    }
-    let with_index = format!("{}/index", rel);
-    view.page(&with_index)
-}
-
-fn strip_md_url_suffix(rel: &str) -> String {
-    rel.rsplit_once('.')
-        .filter(|(_, ext)| ext.eq_ignore_ascii_case("md"))
-        .map(|(base, _)| base.to_string())
-        .unwrap_or_else(|| rel.to_string())
+    crate::content::page::page_lookup_keys(normalized)
+        .iter()
+        .find_map(|key| view.page(key))
 }
 
 /// Resolve a static file, returning its absolute path and the site-relative path the

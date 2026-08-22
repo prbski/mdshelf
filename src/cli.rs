@@ -781,39 +781,28 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 }
 
 /// Find the site and site-relative path for a user-supplied path or URL.
+///
+/// Must agree with the server for every spelling of the same page, or `acl explain`
+/// answers a different question than the one the reader will actually ask.
 fn locate_target(
     universe: &Universe,
     raw: &str,
 ) -> Result<(std::sync::Arc<crate::content::Site>, PathBuf)> {
-    // A URL with a mount prefix, e.g. /docs/hr/comp.
+    // A URL carrying a mount prefix, e.g. /docs/hr/comp.
     for site in universe.sites() {
         if let Some(tail) = raw.strip_prefix(site.mount.as_str())
             && (tail.is_empty() || tail.starts_with('/'))
+            && let Some(found) = resolve_within_site(site, tail.trim_start_matches('/'))
         {
-            let trimmed = tail.trim_start_matches('/');
-            if let Some(page) = find_page_by_url_path(site, trimmed) {
-                return Ok((site.clone(), page));
-            }
+            return Ok((site.clone(), found));
         }
     }
 
-    // Otherwise treat it as a path relative to some site root.
+    // Otherwise, a path relative to some site root.
     let relative = raw.trim_start_matches('/');
     for site in universe.sites() {
-        // Resolve to the casing the filesystem uses, exactly as the server does.
-        //
-        // Rules are keyed on the on-disk path. Answering for the string the user typed
-        // meant `acl explain HR/comp.md` reported ALLOW where the server denies — the
-        // wrong answer, in the direction of false reassurance, from the one command
-        // whose whole purpose is telling you whether a page is locked down.
-        if let Some(resolved) =
-            crate::content::source::true_relative_path(&site.root, Path::new(relative))
-            && site.root.join(&resolved).exists()
-        {
-            return Ok((site.clone(), resolved));
-        }
-        if let Some(page) = find_page_by_url_path(site, relative) {
-            return Ok((site.clone(), page));
+        if let Some(found) = resolve_within_site(site, relative) {
+            return Ok((site.clone(), found));
         }
     }
 
@@ -827,11 +816,37 @@ fn locate_target(
     Ok((site, PathBuf::from(relative)))
 }
 
+/// Resolve one candidate string against a site, however the reader spelled it.
+///
+/// Tries the page map first, then the filesystem — with and without a markdown
+/// extension — always returning the on-disk path, because that is what rules are keyed
+/// on. Anything less exact reports a verdict for a path that is not the one being
+/// served.
+fn resolve_within_site(site: &crate::content::Site, candidate: &str) -> Option<PathBuf> {
+    if candidate.is_empty() {
+        return find_page_by_url_path(site, candidate);
+    }
+    if let Some(page) = find_page_by_url_path(site, candidate) {
+        return Some(page);
+    }
+
+    // A differently-cased spelling misses the page map, which is keyed exactly. The
+    // filesystem is the authority the server also consults.
+    for attempt in [candidate.to_string(), format!("{candidate}.md")] {
+        if let Some(resolved) =
+            crate::content::source::true_relative_path(&site.root, Path::new(&attempt))
+            && site.root.join(&resolved).exists()
+        {
+            return Some(resolved);
+        }
+    }
+    None
+}
+
 fn find_page_by_url_path(site: &crate::content::Site, url_path: &str) -> Option<PathBuf> {
-    let key = url_path.trim_matches('/');
-    let stripped = key.strip_suffix(".md").unwrap_or(key);
-    site.page(stripped)
-        .or_else(|| site.page(&format!("{stripped}/index")))
+    crate::content::page::page_lookup_keys(url_path)
+        .iter()
+        .find_map(|key| site.page(key))
         .map(|page| page.rel_path.clone())
 }
 

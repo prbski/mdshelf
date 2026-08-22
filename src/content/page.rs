@@ -151,6 +151,30 @@ pub fn url_path_from_rel(rel: &Path) -> (String, bool) {
     (parts.join("/"), is_index)
 }
 
+/// The page-map keys a URL path may refer to, in priority order.
+///
+/// One definition, shared by the server and the CLI. Two of them drifted: the server
+/// stripped a `.md` suffix case-insensitively and the CLI did not, so
+/// `acl explain /docs/hr/comp.MD` resolved to a different page than the server serves
+/// — and reported *allow* where the server denies. Any second implementation of "which
+/// page is this URL?" will drift the same way.
+pub fn page_lookup_keys(url_path: &str) -> Vec<String> {
+    let trimmed = url_path.trim_matches('/');
+    if trimmed.is_empty() {
+        return vec![String::new()];
+    }
+
+    // An explicit markdown extension names one page and only that page.
+    if let Some((base, extension)) = trimmed.rsplit_once('.')
+        && (extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown"))
+    {
+        return vec![base.to_string()];
+    }
+
+    // Otherwise the URL may name the page directly, or the folder it indexes.
+    vec![trimmed.to_string(), format!("{trimmed}/index")]
+}
+
 /// Compose the absolute URL of a page from its mount and url_path.
 pub fn join_url(mount: &str, url_path: &str) -> String {
     let m = if mount == "/" { "" } else { mount };

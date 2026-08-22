@@ -512,8 +512,15 @@ fn explain_gives_the_same_verdict_however_the_path_is_spelled() {
         "hr/comp.md",
         "HR/comp.md",
         "Hr/COMP.md",
+        // A case-variant extension: the server strips `.md` case-insensitively, so the
+        // CLI must too. It did not, which is how this test grew.
+        "hr/comp.MD",
         "/docs/hr/comp",
+        "/docs/hr/comp.md",
+        "/docs/HR/comp.MD",
+        "/docs/HR/COMP",
         "hr/comp",
+        "HR/comp",
     ] {
         let output = run_mdshelf(&[
             "acl",
