@@ -298,10 +298,20 @@ fn export_site(
     all_sites: &[SiteListEntry],
     config_summary: &ConfigSummary,
 ) -> Result<usize> {
-    let site = site_ctx.site;
     let mut count = 0usize;
 
-    if site.page("").is_none() {
+    // A site the recipient can see nothing of must contribute nothing at all — not even
+    // an empty auto-generated index, whose path and title would disclose that the site
+    // exists. The bundle is handed to one person; another client's project name has no
+    // business in it.
+    if site_ctx.viewer().is_some() && site_ctx.pages().next().is_none() {
+        return Ok(0);
+    }
+
+    // Whether a root index needs synthesising is a question about *this viewer's* site,
+    // not the whole one: a root `index.md` they may not read leaves them with no
+    // landing page at all.
+    if site_ctx.view.page("").is_none() {
         export_site_root_index(output, renderer, site_ctx, all_sites, config_summary)?;
         count += 1;
     }

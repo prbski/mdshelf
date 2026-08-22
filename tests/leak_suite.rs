@@ -688,6 +688,71 @@ fn export_is_unchanged_on_a_vault_with_no_rules() {
     assert!(read_bundle(&out).contains("Guide"));
 }
 
+/// Regression: an exported bundle must not name a site the recipient cannot see.
+///
+/// `export_site` decided whether to synthesise a root index from the *unfiltered*
+/// site, so a viewer with no access to a second site still got an empty
+/// `secret-project/index.html` carrying that site's title and mount. For the
+/// consultancy use case — one bundle per client — that is another client's project
+/// name shipped in the deliverable.
+#[test]
+fn an_exported_bundle_never_names_a_site_the_recipient_cannot_see() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    for (relative, contents) in [
+        (
+            "vault/index.md",
+            "---\ntitle: Docs\nallow:\n  - team@corp.com\n---\n\n# Docs\n",
+        ),
+        (
+            "other/brief.md",
+            "---\ntitle: Brief\nallow:\n  - client-b@corp.com\n---\n\n# Brief\n",
+        ),
+    ] {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+    let config = root.join("mdshelf.toml");
+    std::fs::write(
+        &config,
+        "[[sites]]\npath = \"vault\"\nmount = \"/docs\"\ntitle = \"Docs\"\n\n\
+         [[sites]]\npath = \"other\"\nmount = \"/skunkworks\"\ntitle = \"Skunkworks Q4\"\n",
+    )
+    .unwrap();
+
+    let out = root.join("out");
+    let output = run_mdshelf(&[
+        "export",
+        "--config",
+        config.to_str().unwrap(),
+        "--output",
+        out.to_str().unwrap(),
+        "--as",
+        "team@corp.com",
+    ]);
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bundle = read_bundle(&out);
+    assert!(
+        bundle.contains("Docs"),
+        "the recipient's own site must be present"
+    );
+    assert!(
+        !bundle.contains("Skunkworks Q4"),
+        "the bundle named a site the recipient cannot see"
+    );
+    assert!(
+        !out.join("skunkworks").exists(),
+        "the bundle contained a directory for a site the recipient cannot see"
+    );
+}
+
 #[test]
 fn export_rejects_an_invalid_viewer_address() {
     let dir = tempfile::tempdir().unwrap();
