@@ -15,7 +15,7 @@ use tracing::warn;
 
 use crate::server::AppState;
 
-use super::{AuthRuntime, SESSION_COOKIE, crypto, sanitize_next};
+use super::{AuthSettings, SESSION_COOKIE, crypto, sanitize_next};
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
@@ -30,24 +30,24 @@ pub fn router() -> Router<Arc<AppState>> {
 
 /// Build the session cookie. `Secure` is set only on an HTTPS origin, so local
 /// development over loopback keeps working (SEC-5).
-fn session_cookie(runtime: &AuthRuntime, value: String) -> Cookie<'static> {
+fn session_cookie(settings: &AuthSettings, value: String) -> Cookie<'static> {
     Cookie::build((SESSION_COOKIE, value))
         .path("/")
         .http_only(true)
         .same_site(SameSite::Lax)
-        .secure(runtime.settings.is_secure_origin())
+        .secure(settings.is_secure_origin())
         .max_age(cookie::time::Duration::seconds(
-            runtime.settings.session_max_age.as_secs() as i64,
+            settings.session_max_age.as_secs() as i64,
         ))
         .build()
 }
 
-fn cleared_cookie(runtime: &AuthRuntime) -> Cookie<'static> {
+fn cleared_cookie(settings: &AuthSettings) -> Cookie<'static> {
     Cookie::build((SESSION_COOKIE, ""))
         .path("/")
         .http_only(true)
         .same_site(SameSite::Lax)
-        .secure(runtime.settings.is_secure_origin())
+        .secure(settings.is_secure_origin())
         .max_age(cookie::time::Duration::seconds(0))
         .build()
 }
@@ -163,7 +163,7 @@ async fn callback(
         }
     };
 
-    let jar = jar.add(session_cookie(runtime, session_id));
+    let jar = jar.add(session_cookie(&runtime.settings, session_id));
     (jar, Redirect::to(&next)).into_response()
 }
 
@@ -177,6 +177,64 @@ async fn logout(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response 
     {
         warn!(%error, "deleting the session on logout failed");
     }
-    let jar = jar.add(cleared_cookie(runtime));
+    let jar = jar.add(cleared_cookie(&runtime.settings));
     (jar, Redirect::to("/")).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    fn settings(public_url: &str) -> AuthSettings {
+        AuthSettings {
+            session_max_age: Duration::from_secs(30 * 86_400),
+            audit_retention: Duration::from_secs(90 * 86_400),
+            owner_email: None,
+            public_url: public_url.to_string(),
+            database_path: PathBuf::from("/tmp/mdshelf.db"),
+            key_file_path: PathBuf::from("/tmp/secret.key"),
+        }
+    }
+
+    /// SEC-5, in the direction the integration tests cannot reach.
+    ///
+    /// The harness always serves over loopback, so every end-to-end assertion checks
+    /// that `Secure` is *absent*. If `is_secure_origin` were inverted, the suite would
+    /// stay green while production shipped session cookies without `Secure`.
+    #[test]
+    fn a_session_cookie_on_an_https_origin_is_marked_secure() {
+        let cookie = session_cookie(&settings("https://docs.acme.com"), "abc".into());
+        let rendered = cookie.to_string();
+        assert!(rendered.contains("Secure"), "got: {rendered}");
+        assert!(rendered.contains("HttpOnly"), "got: {rendered}");
+        assert!(rendered.contains("SameSite=Lax"), "got: {rendered}");
+    }
+
+    #[test]
+    fn a_session_cookie_on_a_loopback_origin_is_not_marked_secure() {
+        // Secure on plain HTTP would make the cookie unusable and break local dev.
+        let cookie = session_cookie(&settings("http://127.0.0.1:4444"), "abc".into());
+        let rendered = cookie.to_string();
+        assert!(!rendered.contains("Secure"), "got: {rendered}");
+        assert!(rendered.contains("HttpOnly"), "got: {rendered}");
+    }
+
+    #[test]
+    fn the_clearing_cookie_matches_the_attributes_it_must_overwrite() {
+        // A browser only replaces a cookie when the attributes line up; a mismatch
+        // leaves the original in place and logout silently fails.
+        for origin in ["https://docs.acme.com", "http://127.0.0.1:4444"] {
+            let live = session_cookie(&settings(origin), "abc".into()).to_string();
+            let cleared = cleared_cookie(&settings(origin)).to_string();
+            assert_eq!(
+                live.contains("Secure"),
+                cleared.contains("Secure"),
+                "Secure differs between the live and clearing cookie for {origin}"
+            );
+            assert!(cleared.contains("Path=/"));
+            assert!(cleared.contains("Max-Age=0"), "got: {cleared}");
+        }
+    }
 }

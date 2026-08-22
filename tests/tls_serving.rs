@@ -113,6 +113,81 @@ async fn a_tls_listener_does_not_answer_plain_http() {
     );
 }
 
+/// US-22: `auth setup --self-signed` must produce a certificate that actually works.
+///
+/// Closes the loop between the two features: the wizard writes the pair, and the TLS
+/// path serves with it. A wizard that emits an unusable certificate is worse than no
+/// wizard, because the failure surfaces later and somewhere else.
+#[tokio::test]
+async fn the_wizards_self_signed_certificate_serves_tls() {
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mdshelf"))
+        .args([
+            "auth",
+            "setup",
+            "--self-signed",
+            dir.path().to_str().expect("path"),
+            "--public-url",
+            "https://localhost",
+        ])
+        .output()
+        .expect("running the wizard");
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The caveats matter as much as the files: this certificate is not a deployment.
+    assert!(stdout.contains("Browsers will warn"), "got:\n{stdout}");
+    assert!(
+        stdout.contains("Google will not accept a self-signed host"),
+        "got:\n{stdout}"
+    );
+
+    let cert = dir.path().join("mdshelf-dev.crt");
+    let key = dir.path().join("mdshelf-dev.key");
+    assert!(cert.is_file() && key.is_file());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&key)
+            .expect("key metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "the private key must be owner-only");
+    }
+
+    // And now the point: it has to serve.
+    let port = free_port();
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().expect("addr");
+    let router = Router::new().route("/", get(|| async { "wizard cert works" }));
+    tokio::spawn(async move {
+        let _ = serve(TlsMode::Supplied { cert, key }, address, router).await;
+    });
+    for _ in 0..40 {
+        if std::net::TcpStream::connect(address).is_ok() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("client");
+    let response = client
+        .get(format!("https://localhost:{port}/"))
+        .send()
+        .await
+        .expect("the wizard's certificate should complete a handshake");
+    assert_eq!(response.text().await.expect("body"), "wizard cert works");
+}
+
 /// A missing or unreadable certificate must fail at startup with a clear message,
 /// not at the first request.
 #[tokio::test]
