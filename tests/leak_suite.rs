@@ -428,6 +428,101 @@ async fn case_variant_paths_do_not_bypass_a_folder_rule() {
     assert!(response.text().await.expect("body").contains(SECRET_BODY));
 }
 
+/// Regression: the case-variant fix must not break symlinked vaults.
+///
+/// mdshelf follows symlinks deliberately — assembling a shelf from note directories
+/// that live elsewhere is a supported shape. The first version of the case fix used
+/// `canonicalize`, which also resolves symlinks, so a linked file landed outside the
+/// site root and was refused. Pages served and their images 404'd, and it changed
+/// behaviour on an *unauthenticated* server, breaking NFR-2.
+#[tokio::test]
+#[cfg(unix)]
+async fn content_reached_through_a_symlink_still_serves() {
+    let outside = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        outside.path().join("linked.md"),
+        "---\ntitle: Linked\n---\n\n# ZZLINKEDZZ\n",
+    )
+    .expect("write");
+    std::fs::write(outside.path().join("pic.png"), "PNG-ZZPICZZ").expect("write");
+
+    // Unauthenticated: must behave exactly as it did before auth existed.
+    let server =
+        TestServer::start_public(&[("index.md", "---\ntitle: Home\n---\n\n# Home\n")]).await;
+    std::os::unix::fs::symlink(outside.path(), server.vault.join("external")).expect("symlink");
+    server.rebuild().await;
+
+    let http = client();
+    for (path, marker) in [
+        ("/docs/external/linked", "ZZLINKEDZZ"),
+        ("/docs/external/pic.png", "ZZPICZZ"),
+    ] {
+        let response = http.get(server.url(path)).send().await.expect("request");
+        assert_eq!(response.status(), 200, "{path} should be served");
+        assert!(
+            response.text().await.expect("body").contains(marker),
+            "{path} did not serve the linked content"
+        );
+    }
+}
+
+/// The same file mounted twice must be gated identically under both mounts.
+///
+/// `examples/mdshelf.toml` ships exactly this shape. Each mount is a separate `Site`
+/// with its own rule index and view cache, so nothing structurally guarantees they
+/// agree — it has to be checked.
+#[tokio::test]
+async fn one_directory_mounted_twice_is_gated_the_same_way_under_both() {
+    const SHARED: &[(&str, &str)] = &[
+        (
+            "index.md",
+            "---\ntitle: Home\nallow:\n  - team@corp.com\n---\n\n# Home\n",
+        ),
+        (
+            "hr/index.md",
+            "---\ntitle: HR\ndeny:\n  - team@corp.com\n---\n\n# HR\n",
+        ),
+        (
+            "hr/secret.md",
+            "---\ntitle: Secret\n---\n\n# ZZSHAREDSECRETZZ\n",
+        ),
+    ];
+
+    let idp = MockIdp::start().await;
+    let sites = [
+        TestSite {
+            mount: "/docs",
+            title: "Docs",
+            files: SHARED,
+        },
+        TestSite {
+            mount: "/notes",
+            title: "Notes",
+            files: SHARED,
+        },
+    ];
+    let server = TestServer::start_with_auth_sites(&sites, &idp).await;
+    let team = sign_in(&server, &idp, "team@corp.com").await;
+
+    for path in [
+        "/docs/hr/secret",
+        "/notes/hr/secret",
+        "/docs/hr/secret.md",
+        "/notes/hr/secret.md",
+    ] {
+        let response = get_as(&server, &team, path).await;
+        assert_eq!(response.status(), 404, "{path} should be denied");
+        assert!(
+            !response
+                .text()
+                .await
+                .expect("body")
+                .contains("ZZSHAREDSECRETZZ"),
+            "{path} leaked under a second mount of the same directory"
+        );
+    }
+}
+
 #[tokio::test]
 async fn path_traversal_cannot_escape_the_vault() {
     let idp = MockIdp::start().await;
