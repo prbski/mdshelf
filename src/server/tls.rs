@@ -76,6 +76,25 @@ pub fn resolve(config: &Config, args: &ServeArgs) -> Result<TlsMode> {
     }
 
     if args.behind_proxy {
+        // `--behind-proxy` asserts that something upstream terminates TLS. An http://
+        // public URL contradicts that assertion: browsers would carry session cookies
+        // in the clear, and mdshelf would have no way to notice. Taking the operator's
+        // word for it while their own flag says otherwise is not a kindness.
+        //
+        // Google would reject the redirect URI too, but at first sign-in rather than at
+        // startup, which is a much worse place to discover it.
+        if args.auth.is_some() {
+            let public_url = args.public_url.as_deref().unwrap_or_default();
+            if public_url.starts_with("http://") && !is_loopback_url(public_url) {
+                bail!(
+                    "--behind-proxy says TLS is terminated upstream, but --public-url is \
+                     {public_url}.\n  \
+                     Browsers would send session cookies over plain HTTP.\n  \
+                     Use an https:// public URL, or terminate TLS in mdshelf with \
+                     --domain or --tls-cert."
+                );
+            }
+        }
         return Ok(TlsMode::BehindProxy);
     }
 
@@ -123,6 +142,23 @@ pub fn public_url(config: &Config, args: &ServeArgs, mode: &TlsMode, port: u16) 
         "mdshelf needs to know the URL browsers use to reach this server, because Google \
          matches the OAuth redirect URI exactly.\n  Pass --public-url https://your.domain"
     )
+}
+
+/// True when a URL points at this machine, where plain HTTP is acceptable — and is the
+/// one case Google exempts from its https-only redirect URI rule.
+fn is_loopback_url(url: &str) -> bool {
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .unwrap_or(url);
+    let authority = rest.split('/').next().unwrap_or_default();
+    // A bracketed IPv6 literal is full of colons, so the port cannot be split off by
+    // splitting on ':' — the host runs to the closing bracket.
+    let host = match authority.strip_prefix('[') {
+        Some(bracketed) => bracketed.split(']').next().unwrap_or_default(),
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 pub fn is_loopback_host(host: &str) -> bool {
@@ -226,6 +262,108 @@ mod tests {
         assert!(!is_loopback_host("0.0.0.0"));
         assert!(!is_loopback_host("docs.acme.com"));
         assert!(!is_loopback_host("192.168.1.10"));
+    }
+
+    /// Bare `ServeArgs`, then mutate the fields a case cares about.
+    fn args() -> ServeArgs {
+        ServeArgs {
+            config: None,
+            host: None,
+            port: None,
+            no_live_reload: false,
+            auth: None,
+            public_url: None,
+            domain: None,
+            tls_cert: None,
+            tls_key: None,
+            behind_proxy: false,
+            acme_contact: None,
+            acme_cache: None,
+            acme_staging: false,
+        }
+    }
+
+    fn config_on(host: &str) -> Config {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let content = dir.path().join("content");
+        std::fs::create_dir_all(&content).unwrap();
+        let mut config = Config::for_test(
+            dir.path().to_path_buf(),
+            vec![crate::config::SiteConfig::for_test(&content)],
+        );
+        config.host = host.to_string();
+        // Leak the temp dir: the config borrows nothing from it, and the test only
+        // needs the paths to have existed at construction.
+        std::mem::forget(dir);
+        config
+    }
+
+    /// The whole matrix in one place. Authenticated sessions must never be served
+    /// where browsers would use plain HTTP off-loopback.
+    #[test]
+    fn authenticated_sessions_are_never_served_in_the_clear() {
+        // Auth off: anything goes, exactly as before auth existed (NFR-2).
+        assert!(resolve(&config_on("0.0.0.0"), &args()).is_ok());
+
+        // Auth on, loopback, no TLS: fine, and the one case Google exempts.
+        let mut a = args();
+        a.auth = Some("google".into());
+        assert!(resolve(&config_on("127.0.0.1"), &a).is_ok());
+        assert!(resolve(&config_on("localhost"), &a).is_ok());
+
+        // Auth on, public interface, no TLS of any kind: refused.
+        for host in ["0.0.0.0", "192.168.1.10", "docs.acme.com", "::"] {
+            let error = match resolve(&config_on(host), &a) {
+                Ok(_) => panic!("{host} without TLS must be refused"),
+                Err(error) => error.to_string(),
+            };
+            assert!(error.contains("plain HTTP"), "{host}: {error}");
+        }
+
+        // Auth on, behind a proxy, but the public URL is plain HTTP: refused, because
+        // the flag's own claim is that browsers see HTTPS.
+        let mut proxy = a.clone();
+        proxy.behind_proxy = true;
+        proxy.public_url = Some("http://docs.acme.com".into());
+        let error = match resolve(&config_on("0.0.0.0"), &proxy) {
+            Ok(_) => panic!("http:// behind a proxy must be refused"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("terminated upstream"), "got: {error}");
+
+        // ...but https behind a proxy is the supported deployment.
+        proxy.public_url = Some("https://docs.acme.com".into());
+        assert!(matches!(
+            resolve(&config_on("0.0.0.0"), &proxy),
+            Ok(TlsMode::BehindProxy)
+        ));
+
+        // A proxy on the same machine during development stays workable.
+        proxy.public_url = Some("http://localhost:8080".into());
+        assert!(resolve(&config_on("127.0.0.1"), &proxy).is_ok());
+
+        // ACME satisfies the requirement on any interface.
+        let mut acme = a.clone();
+        acme.domain = Some("docs.acme.com".into());
+        assert!(matches!(
+            resolve(&config_on("0.0.0.0"), &acme),
+            Ok(TlsMode::Acme(_))
+        ));
+
+        // A URL passed where a hostname belongs is a mistake worth naming.
+        acme.domain = Some("https://docs.acme.com".into());
+        assert!(resolve(&config_on("0.0.0.0"), &acme).is_err());
+    }
+
+    #[test]
+    fn loopback_urls_are_recognised_across_forms() {
+        assert!(is_loopback_url("http://localhost:8080"));
+        assert!(is_loopback_url("http://127.0.0.1:4444/x"));
+        assert!(is_loopback_url("http://[::1]:4444"));
+        assert!(!is_loopback_url("http://docs.acme.com"));
+        // Not loopback just because the string contains it.
+        assert!(!is_loopback_url("http://localhost.evil.example"));
+        assert!(!is_loopback_url("http://127.0.0.1.evil.example"));
     }
 
     #[test]
