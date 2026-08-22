@@ -800,8 +800,17 @@ fn locate_target(
     // Otherwise treat it as a path relative to some site root.
     let relative = raw.trim_start_matches('/');
     for site in universe.sites() {
-        if site.root.join(relative).exists() {
-            return Ok((site.clone(), PathBuf::from(relative)));
+        // Resolve to the casing the filesystem uses, exactly as the server does.
+        //
+        // Rules are keyed on the on-disk path. Answering for the string the user typed
+        // meant `acl explain HR/comp.md` reported ALLOW where the server denies — the
+        // wrong answer, in the direction of false reassurance, from the one command
+        // whose whole purpose is telling you whether a page is locked down.
+        if let Some(resolved) =
+            crate::content::source::true_relative_path(&site.root, Path::new(relative))
+            && site.root.join(&resolved).exists()
+        {
+            return Ok((site.clone(), resolved));
         }
         if let Some(page) = find_page_by_url_path(site, relative) {
             return Ok((site.clone(), page));

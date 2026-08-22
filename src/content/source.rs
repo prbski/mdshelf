@@ -305,3 +305,55 @@ mod tests {
         ));
     }
 }
+
+/// Resolve `rel` to the casing the filesystem actually uses, one component at a time.
+///
+/// Authorization has to be evaluated against the path the rules are keyed on. On a
+/// case-insensitive filesystem a request for `HR/chart.png` opens `hr/chart.png`, so
+/// authorizing the request string would look up a folder named `HR`, miss the rule on
+/// `hr`, and fall through to whatever broader rule applies.
+///
+/// Deliberately *not* `canonicalize`. That resolves symlinks too, and mdshelf follows
+/// symlinks on purpose — a vault assembled from linked note directories is a supported
+/// shape. Canonicalising put such files outside the site root and 404'd them, which both
+/// broke that shape and made pages and their images disagree. Walking the components
+/// fixes the casing without ever leaving the vault's own view of itself.
+pub fn true_relative_path(root: &Path, rel: &Path) -> Option<PathBuf> {
+    let mut current = root.to_path_buf();
+    let mut resolved = PathBuf::new();
+
+    for component in rel.components() {
+        let requested = component.as_os_str();
+
+        // The directory listing is the only trustworthy source of the real name.
+        //
+        // `current.join(requested).exists()` is not: on a case-insensitive filesystem it
+        // answers true for `HR` when only `hr` exists, which is exactly the case this
+        // function exists to correct. Prefer an exact entry — the only right answer on a
+        // case-sensitive filesystem, where `HR` and `hr` are different directories — and
+        // fall back to a case-insensitive one, which can only match on a filesystem that
+        // would have opened it anyway.
+        let requested_str = requested.to_str()?;
+        let mut exact = None;
+        let mut insensitive = None;
+        for entry in std::fs::read_dir(&current).ok()?.flatten() {
+            let file_name = entry.file_name();
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
+            if name == requested_str {
+                exact = Some(file_name);
+                break;
+            }
+            if insensitive.is_none() && name.eq_ignore_ascii_case(requested_str) {
+                insensitive = Some(file_name);
+            }
+        }
+        let name = exact.or(insensitive)?;
+
+        current = current.join(&name);
+        resolved.push(&name);
+    }
+
+    Some(resolved)
+}

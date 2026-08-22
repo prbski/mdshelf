@@ -478,6 +478,74 @@ fn explain_names_the_file_when_a_broken_rule_decided() {
     assert!(stdout.contains("could not be parsed"), "got:\n{stdout}");
 }
 
+/// Regression: `acl explain` disagreed with the server about paths.
+///
+/// Rules are keyed on the on-disk path, but `explain` resolved the string the user
+/// typed. On a case-insensitive filesystem `HR/comp.md` opens `hr/comp.md`, so the
+/// server denied it via the folder rule while `explain` reported **ALLOW** from the
+/// site rule — the wrong answer, in the direction of false reassurance, from the one
+/// command whose purpose is telling you whether a page is locked down.
+#[test]
+fn explain_gives_the_same_verdict_however_the_path_is_spelled() {
+    let dir = tempfile::tempdir().unwrap();
+    // The folder must actually deny team@, so a lookup that misses the folder rule
+    // visibly falls through to the site-level allow.
+    let config = scaffold(
+        dir.path(),
+        &[
+            (
+                "index.md",
+                "---\ntitle: Home\nallow:\n  - team@corp.com\n---\n\n# Home\n",
+            ),
+            (
+                "hr/index.md",
+                "---\ntitle: HR\ndeny:\n  - team@corp.com\n---\n\n# HR\n",
+            ),
+            ("hr/comp.md", "---\ntitle: Comp\n---\n\n# Comp\n"),
+        ],
+    );
+    let config_arg = config.to_str().unwrap();
+
+    // Every spelling of the same file must reach the folder rule.
+    let mut verdicts = Vec::new();
+    for spelling in [
+        "hr/comp.md",
+        "HR/comp.md",
+        "Hr/COMP.md",
+        "/docs/hr/comp",
+        "hr/comp",
+    ] {
+        let output = run_mdshelf(&[
+            "acl",
+            "explain",
+            "--config",
+            config_arg,
+            spelling,
+            "team@corp.com",
+        ]);
+        assert!(output.status.success(), "explain failed for {spelling}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let verdict = stdout
+            .lines()
+            .find(|line| line.starts_with("verdict:"))
+            .unwrap_or("<none>")
+            .to_string();
+        verdicts.push((spelling, verdict));
+    }
+
+    let first = &verdicts[0].1;
+    for (spelling, verdict) in &verdicts {
+        assert_eq!(
+            verdict, first,
+            "{spelling} disagreed with the canonical spelling"
+        );
+    }
+    assert!(
+        first.contains("deny") && first.contains("hr/index.md"),
+        "expected the folder rule to decide; got: {first}"
+    );
+}
+
 #[test]
 fn explain_rejects_an_invalid_address() {
     let dir = tempfile::tempdir().unwrap();
