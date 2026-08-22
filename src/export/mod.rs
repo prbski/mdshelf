@@ -361,7 +361,10 @@ fn folder_index_keys(site_ctx: &SiteExportContext<'_>) -> BTreeSet<String> {
             .collect();
         for depth in 1..segments.len() {
             let prefix = segments[..depth].join("/");
-            if site.page(prefix.as_str()).is_none()
+            // The viewer's projection, not the whole site: a real page at `prefix` that
+            // this recipient may not read should not suppress the generated listing that
+            // is their only way into the pages below it.
+            if site_ctx.view.page(prefix.as_str()).is_none()
                 && build_site_index_under_prefix(
                     site_ctx.pages_map(),
                     prefix.as_str(),

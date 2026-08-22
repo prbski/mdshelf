@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use mdshelf::auth::SESSION_COOKIE;
-use mdshelf::test_support::{MockIdp, TestServer, TokenSpec, client};
+use mdshelf::test_support::{MockIdp, TestServer, TestSite, TokenSpec, client};
 
 /// Distinctive strings that must never reach a viewer without access.
 const SECRET_TITLE: &str = "Executive Compensation Q3";
@@ -772,6 +772,80 @@ fn export_rejects_an_invalid_viewer_address() {
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("not a valid email"),
         "a typo'd address would silently export an empty bundle"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Multi-site: one server, several vaults, different audiences
+// ---------------------------------------------------------------------------
+
+/// Regression: the site switcher listed every configured site on every content page.
+///
+/// `match_site_path` built the switcher from the unfiltered universe, so a reader
+/// invited to one site saw the titles of every other site on the server — a consultant
+/// hosting two clients leaked each client's project name to the other. The home page
+/// was already filtered; content pages were not.
+#[tokio::test]
+async fn the_site_switcher_never_names_a_site_the_viewer_cannot_open() {
+    const DOCS: &[(&str, &str)] = &[
+        (
+            "index.md",
+            "---\ntitle: Docs\nallow:\n  - team@corp.com\n---\n\n# Docs\n",
+        ),
+        ("page.md", "---\ntitle: Page\n---\n\n# Page\n"),
+    ];
+    const SKUNK: &[(&str, &str)] = &[(
+        "index.md",
+        "---\ntitle: Skunkworks\nallow:\n  - client-b@corp.com\n---\n\n# Brief\n",
+    )];
+
+    let idp = MockIdp::start().await;
+    let sites = [
+        TestSite {
+            mount: "/docs",
+            title: "Docs",
+            files: DOCS,
+        },
+        TestSite {
+            mount: "/skunkworks",
+            title: "Skunkworks Q4",
+            files: SKUNK,
+        },
+    ];
+    let server = TestServer::start_with_auth_sites(&sites, &idp).await;
+
+    let team = sign_in(&server, &idp, "team@corp.com").await;
+    for path in ["/", "/docs", "/docs/page"] {
+        let body = get_as(&server, &team, path)
+            .await
+            .text()
+            .await
+            .expect("body");
+        assert!(
+            !body.contains("Skunkworks Q4"),
+            "{path} named a site team@corp.com cannot open"
+        );
+        assert!(
+            !body.contains("/skunkworks"),
+            "{path} linked a site team@corp.com cannot open"
+        );
+    }
+
+    // The other client sees their own site and not this one — the switcher is filtered,
+    // not simply suppressed.
+    let client_b = sign_in(&server, &idp, "client-b@corp.com").await;
+    let body = get_as(&server, &client_b, "/skunkworks")
+        .await
+        .text()
+        .await
+        .expect("body");
+    assert!(
+        body.contains("Skunkworks"),
+        "the invited viewer lost their own site"
+    );
+    assert!(
+        !body.contains(">Docs<"),
+        "client-b@corp.com was shown a site they cannot open"
     );
 }
 

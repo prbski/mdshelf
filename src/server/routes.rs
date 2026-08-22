@@ -216,7 +216,11 @@ async fn site_or_not_found(
     let path = raw_path.trim_end_matches('/');
     let matched = {
         let universe = state.universe.read().await;
+        // The site switcher is built here, where the viewer is known. Building it inside
+        // `match_site_path` meant every content page listed every configured site,
+        // including ones the viewer has no access to.
         match_site_path(&universe, path)
+            .map(|(site, tail)| (site, tail, site_list_entries_for(&universe, viewer.email())))
     };
 
     let Some((site, tail, all_sites)) = matched else {
@@ -238,10 +242,11 @@ async fn site_or_not_found(
     serve_site_request(&state, site, &tail, &all_sites, &viewer, raw_path).await
 }
 
-fn match_site_path(
-    universe: &Universe,
-    request_path: &str,
-) -> Option<(Arc<Site>, String, Vec<SiteListEntry>)> {
+/// Find the site that owns `request_path`, and the tail within it.
+///
+/// Deliberately does not build the site switcher: that depends on who is asking, and
+/// this function does not know.
+fn match_site_path(universe: &Universe, request_path: &str) -> Option<(Arc<Site>, String)> {
     let path = request_path.split('?').next().unwrap_or(request_path);
     let mut candidates: Vec<(Arc<Site>, &str)> = Vec::new();
     for site in universe.sites() {
@@ -257,8 +262,7 @@ fn match_site_path(
     }
     candidates.sort_by(|a, b| b.0.mount.len().cmp(&a.0.mount.len()));
     let (site, tail) = candidates.into_iter().next()?;
-    let all_sites = site_list_entries(universe);
-    Some((site, tail.to_string(), all_sites))
+    Some((site, tail.to_string()))
 }
 
 async fn serve_site_request(

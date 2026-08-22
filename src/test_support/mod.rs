@@ -10,4 +10,4 @@ pub mod mock_idp;
 pub mod server;
 
 pub use mock_idp::{MockIdp, TokenBehaviour, TokenSpec};
-pub use server::{TEST_CLIENT_ID, TestServer, client};
+pub use server::{TEST_CLIENT_ID, TestServer, TestSite, client};

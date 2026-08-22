@@ -23,6 +23,13 @@ use super::mock_idp::MockIdp;
 pub const TEST_CLIENT_ID: &str = "test-client-id";
 pub const TEST_CLIENT_SECRET: &str = "test-client-secret";
 
+/// One site in a multi-site test server.
+pub struct TestSite<'a> {
+    pub mount: &'a str,
+    pub title: &'a str,
+    pub files: &'a [(&'a str, &'a str)],
+}
+
 /// A running server plus the temporary vault behind it.
 pub struct TestServer {
     pub base_url: String,
@@ -48,11 +55,40 @@ impl TestServer {
         Self::start_inner(files, Some(idp), true).await
     }
 
+    /// Start an authenticated server hosting several sites.
+    ///
+    /// Multi-site is a supported configuration, and several surfaces — the site
+    /// switcher above all — only differ across sites, so they cannot be exercised by a
+    /// single-site harness.
+    pub async fn start_with_auth_sites(sites: &[TestSite<'_>], idp: &MockIdp) -> Self {
+        Self::start_inner_sites(sites, Some(idp), false).await
+    }
+
     async fn start_inner(files: &[(&str, &str)], idp: Option<&MockIdp>, live_reload: bool) -> Self {
+        let sites = [TestSite {
+            mount: "/docs",
+            title: "Docs",
+            files,
+        }];
+        Self::start_inner_sites(&sites, idp, live_reload).await
+    }
+
+    async fn start_inner_sites(
+        sites: &[TestSite<'_>],
+        idp: Option<&MockIdp>,
+        live_reload: bool,
+    ) -> Self {
         let dir = TempDir::new().expect("creating a temporary vault");
-        let vault = dir.path().join("vault");
-        std::fs::create_dir_all(&vault).expect("creating the vault directory");
-        write_files(&vault, files);
+
+        let mut site_configs = Vec::with_capacity(sites.len());
+        for site in sites {
+            let root = dir.path().join(site.mount.trim_start_matches('/'));
+            std::fs::create_dir_all(&root).expect("creating the vault directory");
+            write_files(&root, site.files);
+            site_configs.push(SiteConfig::for_test_at(&root, site.mount, site.title));
+        }
+        // The first site's root, for the `vault` convenience accessor.
+        let vault = dir.path().join(sites[0].mount.trim_start_matches('/'));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -60,8 +96,7 @@ impl TestServer {
         let addr: SocketAddr = listener.local_addr().expect("test server address");
         let base_url = format!("http://{addr}");
 
-        let mut config =
-            Config::for_test(dir.path().to_path_buf(), vec![SiteConfig::for_test(&vault)]);
+        let mut config = Config::for_test(dir.path().to_path_buf(), site_configs);
         config.host = "127.0.0.1".to_string();
         config.port = addr.port();
 

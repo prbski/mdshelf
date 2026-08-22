@@ -359,10 +359,15 @@ impl Config {
 impl SiteConfig {
     /// A site rooted at `path`, mounted at `/docs`.
     pub fn for_test(path: &Path) -> Self {
+        Self::for_test_at(path, "/docs", "Docs")
+    }
+
+    /// A site rooted at `path` with an explicit mount and title.
+    pub fn for_test_at(path: &Path, mount: &str, title: &str) -> Self {
         Self {
             path: path.to_path_buf(),
-            mount: Some("/docs".to_string()),
-            title: Some("Docs".to_string()),
+            mount: Some(mount.to_string()),
+            title: Some(title.to_string()),
             theme: None,
             color: None,
         }
