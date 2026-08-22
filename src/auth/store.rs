@@ -217,15 +217,6 @@ impl Store {
         Ok(())
     }
 
-    /// Remove every session belonging to an address. Used by erasure and by explicit
-    /// force-logout.
-    pub fn delete_sessions_for_email(&self, email: &str) -> Result<usize> {
-        let removed = self
-            .lock()
-            .execute("DELETE FROM sessions WHERE email = ?1", params![email])?;
-        Ok(removed)
-    }
-
     /// Move a session's timestamps into the past so age- and idle-dependent behaviour
     /// can be tested without sleeping.
     #[cfg(any(test, feature = "test-support"))]

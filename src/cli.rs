@@ -703,14 +703,30 @@ fn audit(args: AuditArgs) -> Result<()> {
         println!("no access log entries match");
         return Ok(());
     }
-    for entry in entries {
+
+    // The outcome is the whole point of the column. Without it, "who has read this
+    // document" silently includes everyone who was *refused* it — the opposite
+    // conclusion, in the one situation where the answer matters.
+    let mut read = 0usize;
+    let mut refused = 0usize;
+    for entry in &entries {
+        let outcome = if entry.outcome == "allow" {
+            read += 1;
+            "read"
+        } else {
+            refused += 1;
+            "REFUSED"
+        };
         println!(
-            "  {:<28} {:<40} {}",
+            "  {:<9} {:<28} {:<36} {}",
+            outcome,
             entry.email,
             entry.path,
             format_timestamp(entry.ts)
         );
     }
+    println!();
+    println!("{read} read, {refused} refused");
     Ok(())
 }
 

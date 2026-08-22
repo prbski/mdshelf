@@ -400,6 +400,166 @@ async fn requests_are_recorded_against_the_reader_who_made_them() {
     );
 }
 
+/// US-21: the audit output must distinguish a read from a refusal.
+///
+/// It did not. Both were listed identically, so "who has seen this document" silently
+/// included everyone who had been *denied* it — the opposite conclusion, in the one
+/// situation where the answer matters. Found by auditing the acceptance criteria rather
+/// than by hunting for bugs.
+#[test]
+fn audit_distinguishes_reads_from_refusals() {
+    use mdshelf::auth::store::{Outcome, Store, now_ms};
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = scaffold(dir.path(), VAULT);
+
+    let store = Store::open(&dir.path().join("mdshelf.db")).unwrap();
+    let now = now_ms();
+    store
+        .log_access("hr@corp.com", "/docs/hr/policy", now, Outcome::Allow)
+        .unwrap();
+    store
+        .log_access("team@corp.com", "/docs/hr/policy", now, Outcome::Deny)
+        .unwrap();
+    drop(store);
+
+    let output = run_mdshelf(&[
+        "audit",
+        "--config",
+        config.to_str().unwrap(),
+        "--path",
+        "/docs/hr/policy",
+    ]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // The person who was refused must not read as though they had access.
+    let refused_line = stdout
+        .lines()
+        .find(|line| line.contains("team@corp.com"))
+        .expect("the refused attempt should be listed");
+    assert!(
+        refused_line.contains("REFUSED"),
+        "a denied attempt was reported indistinguishably from a read: {refused_line}"
+    );
+
+    let read_line = stdout
+        .lines()
+        .find(|line| line.contains("hr@corp.com"))
+        .expect("the successful read should be listed");
+    assert!(read_line.contains("read"), "got: {read_line}");
+    assert!(stdout.contains("1 read, 1 refused"), "got:\n{stdout}");
+}
+
+/// US-21: the query commands work against a real log.
+#[test]
+fn audit_queries_by_path_and_email_and_can_erase() {
+    use mdshelf::auth::store::{Outcome, Store, now_ms};
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = scaffold(dir.path(), VAULT);
+    let config_arg = config.to_str().unwrap();
+
+    let store = Store::open(&dir.path().join("mdshelf.db")).unwrap();
+    let now = now_ms();
+    store
+        .log_access("ana@corp.com", "/docs/guide", now, Outcome::Allow)
+        .unwrap();
+    store
+        .log_access("bob@corp.com", "/docs/guide", now, Outcome::Allow)
+        .unwrap();
+    drop(store);
+
+    let by_path = run_mdshelf(&["audit", "--config", config_arg, "--path", "/docs/guide"]);
+    let stdout = String::from_utf8_lossy(&by_path.stdout);
+    assert!(stdout.contains("ana@corp.com") && stdout.contains("bob@corp.com"));
+
+    let by_email = run_mdshelf(&["audit", "--config", config_arg, "--email", "ana@corp.com"]);
+    let stdout = String::from_utf8_lossy(&by_email.stdout);
+    assert!(stdout.contains("/docs/guide"));
+    assert!(
+        !stdout.contains("bob@corp.com"),
+        "the filter should exclude others"
+    );
+
+    // GDPR erasure removes that person and leaves everyone else intact (D27).
+    let forget = run_mdshelf(&[
+        "audit",
+        "--config",
+        config_arg,
+        "--email",
+        "ana@corp.com",
+        "--forget",
+    ]);
+    assert!(forget.status.success());
+    assert!(String::from_utf8_lossy(&forget.stdout).contains("removed 1 log entr"));
+
+    let after = run_mdshelf(&["audit", "--config", config_arg, "--email", "ana@corp.com"]);
+    assert!(String::from_utf8_lossy(&after.stdout).contains("no access log entries"));
+
+    let others = run_mdshelf(&["audit", "--config", config_arg, "--email", "bob@corp.com"]);
+    assert!(
+        String::from_utf8_lossy(&others.stdout).contains("/docs/guide"),
+        "erasing one person must not erase anyone else"
+    );
+}
+
+/// US-24: the advisory branches, none of which had coverage.
+#[test]
+fn doctor_reports_unreachable_subtrees_unused_grants_and_missing_indexes() {
+    use mdshelf::auth::store::{Outcome, Store, now_ms};
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = scaffold(
+        dir.path(),
+        &[
+            (
+                "index.md",
+                "---\ntitle: Home\nallow:\n  - team@corp.com\n  - never@corp.com\n---\n\n# Home\n",
+            ),
+            // Denies every address the vault names, so nobody can reach it.
+            (
+                "orphan/index.md",
+                "---\ntitle: Orphan\ndeny:\n  - team@corp.com\n  - never@corp.com\n---\n\n# Orphan\n",
+            ),
+            // A folder with no index file of its own.
+            ("loose/page.md", "---\ntitle: Loose\n---\n\n# Loose\n"),
+        ],
+    );
+
+    // A log in which team@ has read something but never@ never has.
+    let store = Store::open(&dir.path().join("mdshelf.db")).unwrap();
+    store
+        .log_access("team@corp.com", "/docs", now_ms(), Outcome::Allow)
+        .unwrap();
+    drop(store);
+
+    let output = run_mdshelf(&["acl", "doctor", "--config", config.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "advisories are warnings, not errors"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("orphan") && stdout.contains("no address named in this vault can read"),
+        "unreachable subtree not reported:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("never@corp.com") && stdout.contains("never seen in the access log"),
+        "unused grant not reported:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("loose/") && stdout.contains("no index.md"),
+        "folder without an index not reported:\n{stdout}"
+    );
+    // Somebody who *has* used their grant must not be flagged.
+    assert!(
+        !stdout.contains("team@corp.com  granted"),
+        "an exercised grant was reported as unused:\n{stdout}"
+    );
+}
+
 #[test]
 fn the_access_log_is_pruned_past_its_retention_window() {
     use mdshelf::auth::store::{Outcome, Store};
