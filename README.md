@@ -115,6 +115,11 @@ Open `http://127.0.0.1:4444/` for the site index.
 | `mdshelf serve` | Start the web server |
 | `mdshelf check` | Validate config and scan content |
 | `mdshelf export` | Export a static bundle of HTML and CSS files |
+| `mdshelf auth setup` | Walk through creating a Google OAuth client, then verify it |
+| `mdshelf acl explain <path> <email>` | Show why an address can or cannot read a page |
+| `mdshelf acl doctor` | Report access-rule problems |
+| `mdshelf acl grant <email> <path>` | Add an address to a page or folder's `allow` list |
+| `mdshelf audit --path/--email` | Query the access log |
 | `mdshelf install` | Register as a native system service |
 | `mdshelf start` | Start the installed service |
 | `mdshelf stop` | Stop the installed service |
@@ -170,6 +175,154 @@ sidebar_order: 10
 draft: false
 ---
 ```
+
+Two further keys, `allow` and `deny`, control who may read a page — see
+[Private sites with Google sign-in](#private-sites-with-google-sign-in). They are
+stripped before rendering, so the addresses in them never reach the browser.
+
+## Private sites with Google sign-in
+
+`mdshelf serve --auth google` puts every page behind Google sign-in and serves each
+reader only what they have been invited to. Without the flag nothing changes: the
+server behaves exactly as it always has.
+
+### Who may read what
+
+Access rules live in the vault, as frontmatter, in the file they protect:
+
+```yaml
+---
+title: Compensation 2026
+allow:
+  - ana@corp.com
+  - hr-lead@corp.com
+deny:
+  - intern@corp.com
+---
+```
+
+Because the rule is part of the file, renaming, moving, or deleting it carries or
+removes the rule with it. There is nothing to keep in sync.
+
+Rules exist at three levels:
+
+| Where | Governs |
+|---|---|
+| Any `.md` file | That file alone |
+| A folder's `index.md` (or `README.md`) | **That folder, everything beneath it, and the index page itself** |
+| The vault root's `index.md` | The whole site |
+
+Both keys take a **list**. A bare string is an error, not a one-element list — so the
+common typo `allow: a@x.com, b@y.com` is rejected rather than quietly granting access
+to one malformed address.
+
+### How a decision is reached
+
+1. Collect every rule that applies: the file's own, then each ancestor folder's index
+   from nearest to furthest, then the site root.
+2. The most specific level that **names the address** decides. A `deny` there beats an
+   inherited `allow`, and an `allow` there beats an inherited `deny`.
+3. If no level names the address, the answer is **deny**.
+
+> **A site-level `allow` reaches into every folder.** A folder's `allow` *adds* people;
+> it does not remove anyone. To keep somebody out of a subtree that a broader rule
+> already grants, name them in that folder's `deny`. `mdshelf acl doctor` will not
+> guess this for you — use `mdshelf acl explain <path> <email>` whenever the outcome
+> surprises you.
+
+### Fail closed
+
+A path that no rule names is invisible. **A vault with no rules at all shows nobody
+anything** when `--auth google` is on — start by granting someone in the root
+`index.md`. Likewise, a malformed `allow` or `deny` block makes that file unreadable by
+everyone until it is fixed; `mdshelf check` fails on such a block so it never reaches a
+running server, and `mdshelf acl doctor` reports it on a server already running.
+
+Readers who are signed in but not invited get the same response for a restricted page
+and for one that does not exist, so the site cannot be probed to learn what it contains.
+
+### Setting up Google credentials
+
+mdshelf uses **your** Google OAuth client; no credentials ship with the binary.
+
+```bash
+mdshelf auth setup
+```
+
+The wizard prints the console steps, gives you the exact redirect URI to register,
+stores the credentials in `~/.mdshelf/credentials.env` (mode 0600), and proves them
+with a real sign-in before it exits. `MDSHELF_GOOGLE_CLIENT_ID` and
+`MDSHELF_GOOGLE_CLIENT_SECRET` override the file if you use a secret manager.
+
+### HTTPS
+
+Google accepts a plain-HTTP redirect URI only for `localhost`, so any real deployment
+needs a certificate. mdshelf refuses to serve authenticated sessions over plain HTTP on
+a non-loopback address rather than warning and doing it anyway.
+
+```bash
+# Let's Encrypt, obtained and renewed automatically (needs ports 80 and 443)
+mdshelf serve --auth google --domain docs.acme.com
+
+# A certificate you already have
+mdshelf serve --auth google --tls-cert fullchain.pem --tls-key privkey.pem
+
+# TLS terminated by an ALB, nginx, Caddy, or Cloudflare in front
+mdshelf serve --auth google --behind-proxy --public-url https://docs.acme.com
+```
+
+For LAN or offline testing, `mdshelf auth setup --self-signed <dir>` writes a
+development certificate. Browsers will warn about it, and Google will not accept a
+self-signed host as a redirect URI, so it is only useful before auth is switched on.
+
+### Sessions, revocation, and Google availability
+
+Removing an address from a vault file takes effect on the **next request** — the
+watcher reloads the rules and every request resolves them afresh.
+
+Sessions are re-validated against Google when they have been idle for more than 30
+minutes, so a suspended Google account loses access without a reader being interrupted
+mid-page. Sessions expire absolutely after `session_max_age` (default 30 days).
+
+> **Google is a hard dependency for re-validation.** If a re-validation attempt fails —
+> whether Google explicitly rejects the grant *or* is simply unreachable — the session
+> ends and the reader signs in again. A Google incident, or a self-hosted box that
+> briefly loses its uplink, will therefore sign out readers whose sessions have gone
+> idle. This is deliberate: it is what makes "revoked means revoked" true without
+> qualification. Each such event is logged at WARN with the cause, so an outage is
+> visible in the logs rather than presenting as mysterious sign-outs.
+
+### Static export
+
+A static bundle has no authentication, so exporting a vault that declares rules
+requires saying whose view it is:
+
+```bash
+mdshelf export --as ana@corp.com --output ./for-ana
+```
+
+The bundle then contains exactly the pages, navigation, listings, and attachments that
+address can see, and reports how many pages were skipped. `mdshelf export` on a vault
+with no rules is unchanged. Note that the bundle itself is unprotected once you send it.
+
+### Auth-related configuration
+
+```toml
+[auth]
+session_max_age = "30d"        # absolute session ceiling
+owner_email     = "owner@corp.com"  # request-access link on the deny page
+audit_retention = "90d"        # access-log retention, pruned hourly
+# database = "./mdshelf.db"    # sessions + access log; safe to delete
+# key_file = "~/.mdshelf/secret.key"  # encrypts stored refresh tokens, mode 0600
+```
+
+`mdshelf.db` is derived state: deleting it costs only live sessions and access history.
+
+### What mdshelf writes
+
+`mdshelf acl grant` is the **only** command that writes to your vault, and it asks
+before creating a folder's `index.md`. Serving, checking, exporting, and explaining are
+strictly read-only.
 
 ## Theme customisation
 

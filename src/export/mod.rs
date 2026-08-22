@@ -7,12 +7,11 @@ use anyhow::{Context, Result, bail};
 use crate::cli::ExportArgs;
 use crate::config::Config;
 use crate::content::page::{humanize, join_url};
+use crate::content::source::iter_site_static_files;
 use crate::content::tree::{breadcrumbs, breadcrumbs_for_index_path, prev_next};
 use crate::content::{
-    Page, Site, SiteIndexContext, Universe, build_site_index_context,
-    build_site_index_under_prefix,
+    Page, Site, SiteIndexContext, Universe, build_site_index_context, build_site_index_under_prefix,
 };
-use crate::content::source::iter_site_static_files;
 use crate::render::markdown::MarkdownRenderer;
 use crate::render::templates::{
     ConfigSummary, Crumb, HomeTemplateContext, NeighborContext, PageContext, PageTemplateContext,
@@ -27,11 +26,17 @@ const LIVERELOAD_ASSET: &str = "assets/js/livereload.js";
 struct SiteExportContext<'a> {
     site: &'a Site,
     mount: String,
+    /// The projection being exported. With `--as`, only what that viewer may read;
+    /// otherwise the whole site (US-20).
+    view: Arc<crate::content::SiteView>,
+    viewer: Option<String>,
 }
 
 impl<'a> SiteExportContext<'a> {
-    fn from_site(site: &'a Site, flat: bool) -> Self {
+    fn from_site(site: &'a Site, flat: bool, viewer: Option<&str>) -> Self {
         Self {
+            view: site.view(viewer),
+            viewer: viewer.map(str::to_string),
             site,
             mount: if flat {
                 "/".to_string()
@@ -39,6 +44,22 @@ impl<'a> SiteExportContext<'a> {
                 site.mount.clone()
             },
         }
+    }
+
+    fn viewer(&self) -> Option<&str> {
+        self.viewer.as_deref()
+    }
+
+    fn pages(&self) -> impl Iterator<Item = &Page> {
+        self.view.pages()
+    }
+
+    fn pages_map(&self) -> &std::collections::BTreeMap<String, Page> {
+        self.view.pages_map()
+    }
+
+    fn nav_flat(&self) -> Arc<Vec<crate::content::SidebarNavRow>> {
+        self.view.nav_flat()
     }
 
     fn flat(&self) -> bool {
@@ -68,6 +89,8 @@ pub fn run(args: ExportArgs) -> Result<()> {
     let export_all = args.site.is_empty();
     let flat_single = selected.len() == 1;
 
+    let viewer = resolve_export_viewer(&selected, args.as_viewer.as_deref())?;
+
     let output = expand_output_directory(&args.output)?;
     prepare_output_directory(&output, args.force)?;
 
@@ -75,7 +98,7 @@ pub fn run(args: ExportArgs) -> Result<()> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         theme_name: config.theme.name.clone(),
     };
-    let all_sites = site_list_entries_for_export(&selected, flat_single);
+    let all_sites = site_list_entries_for_export(&selected, flat_single, viewer.as_deref());
 
     write_theme_assets(&output, &theme, &markdown)?;
 
@@ -85,8 +108,10 @@ pub fn run(args: ExportArgs) -> Result<()> {
         page_count += 1;
     }
 
+    let mut skipped = 0usize;
     for site in &selected {
-        let ctx = SiteExportContext::from_site(site, flat_single);
+        let ctx = SiteExportContext::from_site(site, flat_single, viewer.as_deref());
+        skipped += site.pages().count() - ctx.pages().count();
         page_count += export_site(&output, &renderer, &ctx, &all_sites, &config_summary)?;
         copy_site_static_files(&output, &ctx)?;
     }
@@ -98,13 +123,61 @@ pub fn run(args: ExportArgs) -> Result<()> {
     } else {
         format!("{} sites", selected.len())
     };
-    println!(
-        "exported {} page(s) from {} to {}",
-        page_count,
-        site_label,
-        output.display()
-    );
+    match viewer.as_deref() {
+        Some(email) => println!(
+            "exported {} page(s) visible to {} from {} to {}",
+            page_count,
+            email,
+            site_label,
+            output.display()
+        ),
+        None => println!(
+            "exported {} page(s) from {} to {}",
+            page_count,
+            site_label,
+            output.display()
+        ),
+    }
+    if skipped > 0 {
+        // Never silently drop pages: the reader of this line is deciding whether the
+        // bundle they are about to send is complete.
+        println!("skipped {skipped} restricted page(s)");
+    }
     Ok(())
+}
+
+/// Decide whose view is being exported, and refuse the dangerous default.
+///
+/// A static bundle carries no authentication at all. Exporting a vault that declares
+/// access rules without saying whose view it is would flatten a private vault into
+/// world-readable HTML — the one outcome this feature exists to prevent (US-20).
+fn resolve_export_viewer(sites: &[Arc<Site>], requested: Option<&str>) -> Result<Option<String>> {
+    if let Some(raw) = requested {
+        let email = crate::auth::normalize_email(raw);
+        if !crate::auth::is_valid_email(&email) {
+            bail!("--as `{raw}` is not a valid email address");
+        }
+        return Ok(Some(email));
+    }
+
+    let ruled: Vec<&str> = sites
+        .iter()
+        .filter(|site| !site.acl().is_empty())
+        .map(|site| site.title.as_str())
+        .collect();
+
+    if ruled.is_empty() {
+        // No rules anywhere: this vault was already public, and export behaves exactly
+        // as it always has.
+        return Ok(None);
+    }
+
+    bail!(
+        "this vault declares access rules ({}), and a static export has no authentication —\n  \
+         every exported page would be world-readable.\n  \
+         Re-run with --as <email> to export exactly what that person can see.",
+        ruled.join(", ")
+    )
 }
 
 fn select_sites(universe: &Universe, filters: &[String]) -> Result<Vec<Arc<Site>>> {
@@ -179,12 +252,15 @@ fn prepare_output_directory(output: &Path, force: bool) -> Result<()> {
         std::fs::remove_dir_all(output)
             .with_context(|| format!("removing {}", output.display()))?;
     }
-    std::fs::create_dir_all(output)
-        .with_context(|| format!("creating {}", output.display()))?;
+    std::fs::create_dir_all(output).with_context(|| format!("creating {}", output.display()))?;
     Ok(())
 }
 
-fn write_theme_assets(output: &Path, theme: &ThemeStack, markdown: &MarkdownRenderer) -> Result<()> {
+fn write_theme_assets(
+    output: &Path,
+    theme: &ThemeStack,
+    markdown: &MarkdownRenderer,
+) -> Result<()> {
     for (relative, asset) in theme.list_asset_paths() {
         if relative == LIVERELOAD_ASSET {
             continue;
@@ -230,15 +306,23 @@ fn export_site(
         count += 1;
     }
 
-    for page in site.pages() {
+    for page in site_ctx.pages() {
         if page.draft {
             continue;
         }
-        export_page(output, renderer, site_ctx, page, all_sites, config_summary, None)?;
+        export_page(
+            output,
+            renderer,
+            site_ctx,
+            page,
+            all_sites,
+            config_summary,
+            None,
+        )?;
         count += 1;
     }
 
-    for folder_key in folder_index_keys(site) {
+    for folder_key in folder_index_keys(site_ctx) {
         export_folder_index(
             output,
             renderer,
@@ -253,9 +337,10 @@ fn export_site(
     Ok(count)
 }
 
-fn folder_index_keys(site: &Site) -> BTreeSet<String> {
+fn folder_index_keys(site_ctx: &SiteExportContext<'_>) -> BTreeSet<String> {
+    let site = site_ctx.site;
     let mut keys = BTreeSet::new();
-    for page in site.pages() {
+    for page in site_ctx.pages() {
         if page.draft {
             continue;
         }
@@ -267,7 +352,12 @@ fn folder_index_keys(site: &Site) -> BTreeSet<String> {
         for depth in 1..segments.len() {
             let prefix = segments[..depth].join("/");
             if site.page(prefix.as_str()).is_none()
-                && build_site_index_under_prefix(site.pages_map(), prefix.as_str(), site.root.as_path()).is_some()
+                && build_site_index_under_prefix(
+                    site_ctx.pages_map(),
+                    prefix.as_str(),
+                    site.root.as_path(),
+                )
+                .is_some()
             {
                 keys.insert(prefix);
             }
@@ -285,7 +375,7 @@ fn export_site_root_index(
 ) -> Result<()> {
     let site = site_ctx.site;
     let site_index = remap_site_index(
-        build_site_index_context(site.pages_map(), site.root.as_path()),
+        build_site_index_context(site_ctx.pages_map(), site.root.as_path()),
         site_ctx,
     );
     let root_url = join_url(site_ctx.mount.as_str(), "");
@@ -305,7 +395,7 @@ fn export_site_root_index(
             frontmatter: serde_json::json!({}),
             html: String::new(),
         },
-        nav_flat: remap_nav_flat(site.nav_flat(), site_ctx),
+        nav_flat: remap_nav_flat(site_ctx.nav_flat(), site_ctx),
         breadcrumbs: vec![Crumb {
             title: site.title.clone(),
             url: root_url.clone(),
@@ -333,12 +423,8 @@ fn export_folder_index(
 ) -> Result<()> {
     let site = site_ctx.site;
     let folder_site_index = remap_site_index(
-        build_site_index_under_prefix(
-            site.pages_map(),
-            folder_key,
-            site.root.as_path(),
-        )
-        .with_context(|| format!("missing folder index for {}", folder_key))?,
+        build_site_index_under_prefix(site_ctx.pages_map(), folder_key, site.root.as_path())
+            .with_context(|| format!("missing folder index for {}", folder_key))?,
         site_ctx,
     );
     let folder_url = join_url(site_ctx.mount.as_str(), folder_key);
@@ -350,7 +436,7 @@ fn export_folder_index(
     let crumbs = breadcrumbs_for_index_path(
         site.title.as_str(),
         site_ctx.mount.as_str(),
-        site.pages_map(),
+        site_ctx.pages_map(),
         folder_key,
         synthetic_title.as_str(),
     );
@@ -370,7 +456,7 @@ fn export_folder_index(
             frontmatter: serde_json::json!({}),
             html: String::new(),
         },
-        nav_flat: remap_nav_flat(site.nav_flat(), site_ctx),
+        nav_flat: remap_nav_flat(site_ctx.nav_flat(), site_ctx),
         breadcrumbs: crumbs,
         prev: None,
         next: None,
@@ -398,10 +484,10 @@ fn export_page(
     let crumbs = breadcrumbs(
         site.title.as_str(),
         site_ctx.mount.as_str(),
-        site.pages_map(),
+        site_ctx.pages_map(),
         page,
     );
-    let (prev_page, next_page) = prev_next(site.pages_map(), page);
+    let (prev_page, next_page) = prev_next(site_ctx.pages_map(), page);
     let prev = prev_page.map(|neighbor| NeighborContext {
         title: neighbor.title.clone(),
         url: site_ctx.page_url(neighbor),
@@ -423,7 +509,7 @@ fn export_page(
             frontmatter: page.frontmatter.clone(),
             html: page.html.clone(),
         },
-        nav_flat: remap_nav_flat(site.nav_flat(), site_ctx),
+        nav_flat: remap_nav_flat(site_ctx.nav_flat(), site_ctx),
         breadcrumbs: crumbs,
         prev,
         next,
@@ -441,6 +527,11 @@ fn export_page(
 fn copy_site_static_files(output: &Path, site_ctx: &SiteExportContext<'_>) -> Result<()> {
     let site = site_ctx.site;
     for rel in iter_site_static_files(&site.root)? {
+        // The same reasoning as US-18: an exported bundle whose images are unfiltered
+        // leaks the content of pages that were correctly omitted.
+        if !site.allows_path(&rel, site_ctx.viewer()) {
+            continue;
+        }
         let source = site.root.join(&rel);
         let target = if site_ctx.flat() {
             output.join(&rel)
@@ -469,22 +560,32 @@ fn site_context(site_ctx: &SiteExportContext<'_>) -> SiteContext {
     }
 }
 
-fn site_list_entries_for_export(sites: &[Arc<Site>], flat_single: bool) -> Vec<SiteListEntry> {
+fn site_list_entries_for_export(
+    sites: &[Arc<Site>],
+    flat_single: bool,
+    viewer: Option<&str>,
+) -> Vec<SiteListEntry> {
     sites
         .iter()
-        .map(|site| {
+        .filter_map(|site| {
             let mount = if flat_single {
                 "/".to_string()
             } else {
                 site.mount.clone()
             };
-            SiteListEntry {
+            // Counts come from the exported projection, so the bundle does not announce
+            // how many pages the recipient did not receive.
+            let page_count = site.view(viewer).pages().count();
+            if viewer.is_some() && page_count == 0 {
+                return None;
+            }
+            Some(SiteListEntry {
                 title: site.title.clone(),
                 mount: mount.clone(),
                 url: mount,
-                page_count: site.pages().count(),
+                page_count,
                 color: site.color.clone(),
-            }
+            })
         })
         .collect()
 }
@@ -552,15 +653,16 @@ fn write_html(path: &Path, output_root: &Path, html: &str) -> Result<()> {
 fn rewrite_asset_urls(html: &str, html_path: &Path, output_root: &Path) -> String {
     let prefix = relative_asset_prefix(html_path, output_root);
     let mut out = html.replace("/__assets/", &prefix);
-    out = out.replace("/__mdshelf/syntax.css", &format!("{prefix}{SYNTAX_CSS_FILE}"));
+    out = out.replace(
+        "/__mdshelf/syntax.css",
+        &format!("{prefix}{SYNTAX_CSS_FILE}"),
+    );
     out
 }
 
 fn relative_asset_prefix(html_path: &Path, output_root: &Path) -> String {
     let parent = html_path.parent().unwrap_or(output_root);
-    let rel = parent
-        .strip_prefix(output_root)
-        .unwrap_or(parent);
+    let rel = parent.strip_prefix(output_root).unwrap_or(parent);
     let depth = rel.components().count();
     if depth == 0 {
         "assets/".to_string()
@@ -593,10 +695,7 @@ mod tests {
     fn relative_asset_prefix_nested() {
         let output = PathBuf::from("/dist");
         let html = output.join("docs/guide/intro/index.html");
-        assert_eq!(
-            relative_asset_prefix(&html, &output),
-            "../../../assets/"
-        );
+        assert_eq!(relative_asset_prefix(&html, &output), "../../../assets/");
     }
 
     #[test]

@@ -12,8 +12,8 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{error, warn};
 
 use crate::config::Config;
-use crate::content::source::should_trigger_rebuild;
 use crate::content::Universe;
+use crate::content::source::should_trigger_rebuild;
 use crate::render::Renderer;
 use crate::server::AppState;
 use crate::theme::ThemeStack;
@@ -23,11 +23,40 @@ const PING_INTERVAL: Duration = Duration::from_secs(20);
 
 pub async fn livereload_ws(
     State(state): State<Arc<AppState>>,
+    jar: axum_extra::extract::cookie::CookieJar,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     if !state.live_reload_enabled {
         return (axum::http::StatusCode::NOT_FOUND, "live reload disabled").into_response();
     }
+
+    // US-19. The socket is a long-lived channel into the server, so it must be held to
+    // the same standard as a page request: no session, no socket.
+    //
+    // Reload events carry no payload beyond "something changed" — there is no path in
+    // them to filter — so gating the upgrade is the whole of what there is to enforce.
+    // If these events ever grow a path, that payload must be filtered per socket
+    // against the viewer's ACL before it is sent.
+    if state.auth_enabled() {
+        let authorized = match jar.get(crate::auth::SESSION_COOKIE) {
+            Some(cookie) => {
+                let runtime = state.auth.as_ref().expect("auth enabled");
+                matches!(
+                    runtime.resolve_session(cookie.value()).await,
+                    crate::auth::SessionOutcome::Active(_)
+                )
+            }
+            None => false,
+        };
+        if !authorized {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                "sign in to receive live reload events",
+            )
+                .into_response();
+        }
+    }
+
     let receiver = state.live_reload_tx.subscribe();
     ws.on_upgrade(move |socket| handle_socket(socket, receiver))
         .into_response()
@@ -68,7 +97,12 @@ async fn handle_socket(socket: WebSocket, mut reload_rx: broadcast::Receiver<()>
 }
 
 pub async fn spawn_watcher(state: Arc<AppState>) -> Result<()> {
-    let site_roots: Vec<PathBuf> = state.config.sites.iter().map(|site| site.path.clone()).collect();
+    let site_roots: Vec<PathBuf> = state
+        .config
+        .sites
+        .iter()
+        .map(|site| site.path.clone())
+        .collect();
     let theme_dirs = state.renderer.read().await.theme().watch_dirs();
     let mut watch_paths = site_roots.clone();
     watch_paths.extend(theme_dirs.clone());
@@ -104,9 +138,10 @@ pub async fn spawn_watcher(state: Arc<AppState>) -> Result<()> {
                 if event.need_rescan() {
                     return true;
                 }
-                event.paths.iter().any(|path| {
-                    should_trigger_rebuild(path, &event.kind, &site_roots, &theme_dirs)
-                })
+                event
+                    .paths
+                    .iter()
+                    .any(|path| should_trigger_rebuild(path, &event.kind, &site_roots, &theme_dirs))
             });
             if !relevant_change {
                 return;
@@ -173,6 +208,9 @@ async fn rebuild_content(state: &Arc<AppState>, config: &Arc<Config>) -> Result<
     .await
     .map_err(|join_error| anyhow::anyhow!(join_error))?;
     let (universe, renderer) = rebuild_result?;
+    // Refresh the derived rule index before publishing the new universe, so a request
+    // arriving immediately after cannot observe stale rules (US-12).
+    crate::server::sync_rule_index(state, &universe);
     *state.universe.write().await = universe;
     *state.renderer.write().await = renderer;
     Ok(())

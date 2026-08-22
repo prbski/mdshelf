@@ -6,6 +6,7 @@ use gray_matter::{Matter, ParsedEntity, engine::YAML};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+use crate::acl::{AclBlock, parse_acl, strip_acl_keys};
 use crate::render::markdown::{Heading, LinkCtx, MarkdownRenderer};
 
 /// One rendered Markdown page within a site.
@@ -27,9 +28,15 @@ pub struct Page {
     pub layout: String,
     pub sidebar_order: Option<i64>,
     pub draft: bool,
+    /// Frontmatter with the access-rule keys removed (SEC-6). This is what templates
+    /// see, so invitee addresses cannot reach rendered HTML.
     pub frontmatter: JsonValue,
     pub headings: Vec<Heading>,
     pub html: String,
+    /// Access rules declared by this file. Skipped during serialization so it can never
+    /// be rendered into a page by accident.
+    #[serde(skip)]
+    pub acl: AclBlock,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -61,6 +68,11 @@ impl Page {
         let frontmatter_value = parsed.data.unwrap_or(JsonValue::Object(Default::default()));
         let typed: FrontmatterFields =
             serde_json::from_value(frontmatter_value.clone()).unwrap_or_default();
+
+        // Parse the rules, then strip them: everything downstream of this point sees
+        // frontmatter with no addresses in it (SEC-6).
+        let acl = parse_acl(&frontmatter_value, &raw);
+        let frontmatter_value = strip_acl_keys(frontmatter_value);
 
         let (url_path, is_index) = url_path_from_rel(rel_path);
         let url = join_url(mount, &url_path);
@@ -105,6 +117,7 @@ impl Page {
             frontmatter: frontmatter_value,
             html: rendered.html,
             headings: rendered.headings,
+            acl,
         })
     }
 }

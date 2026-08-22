@@ -86,11 +86,7 @@ fn index_row_filename(url_path: &str) -> String {
     if url_path.is_empty() {
         "index.md".to_string()
     } else {
-        url_path
-            .rsplit('/')
-            .next()
-            .unwrap_or(url_path)
-            .to_string()
+        url_path.rsplit('/').next().unwrap_or(url_path).to_string()
     }
 }
 
@@ -285,7 +281,10 @@ pub fn breadcrumbs_for_index_path(
     if url_path.trim().is_empty() {
         return out;
     }
-    let segments: Vec<&str> = url_path.split('/').filter(|segment| !segment.is_empty()).collect();
+    let segments: Vec<&str> = url_path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
     let mut accumulated = String::new();
     for (segment_index, segment) in segments.iter().enumerate() {
         if !accumulated.is_empty() {
@@ -327,9 +326,7 @@ pub fn prev_next<'a>(
             .cmp(&b.sidebar_order.unwrap_or(DEFAULT_ORDER))
             .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
     });
-    let pos = siblings
-        .iter()
-        .position(|p| p.url_path == current.url_path);
+    let pos = siblings.iter().position(|p| p.url_path == current.url_path);
     match pos {
         Some(idx) => (
             idx.checked_sub(1).and_then(|i| siblings.get(i).copied()),

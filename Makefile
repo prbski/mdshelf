@@ -28,7 +28,7 @@ check:
 	$(CARGO) check
 
 test:
-	$(CARGO) test
+	$(CARGO) test --all-features
 
 clippy:
 	$(CARGO) clippy --all-targets --all-features

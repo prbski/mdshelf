@@ -1,16 +1,7 @@
-mod cli;
-mod config;
-mod content;
-mod export;
-mod render;
-mod server;
-mod service;
-mod theme;
-
 use anyhow::Result;
 use clap::Parser;
 
-use crate::cli::Cli;
+use mdshelf::cli::{self, Cli};
 
 #[tokio::main]
 async fn main() -> Result<()> {

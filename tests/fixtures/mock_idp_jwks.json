@@ -1,0 +1,12 @@
+{
+  "keys": [
+    {
+      "kty": "RSA",
+      "use": "sig",
+      "alg": "RS256",
+      "kid": "mdshelf-mock-key-1",
+      "n": "q2F-F83rUAylRBOWRDH84bgFqcIqpvQ_22rKRg9TybgMlKIZOoI_91f0sJV81l6hgiFkkoOLW6Ij5U_pjyvj9LzJIB3Y6hDVgQd0Y7ufk6YAu6yF4daUdWRova6lvgUgWpAMbO-oZ0Fi-4WCMLk-ZkMw0fEtN2C3iBJxZE_8kepJWNwBfuMAlGE7bNlDBkBWpJjcyl_3U_UHJnpSc8vRvNaAtrpIIDYJXl-JSf1eZVwiHBvPRusvdgFN__C-e8HszyjstGseihoiJEgEzctth3WY3txl0jeJ6zImO7Sd4Q8HJmY0wOMPOX_bxCSLj6DeaLuci7FU1ZKut_ljmaY6pw",
+      "e": "AQAB"
+    }
+  ]
+}

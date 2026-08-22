@@ -1,8 +1,11 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
+
+use crate::auth::is_valid_email;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -18,6 +21,11 @@ pub struct Config {
 
     #[serde(default)]
     pub theme: ThemeConfig,
+
+    /// Authentication settings. Absent means the server is entirely unauthenticated
+    /// and behaves exactly as it did before auth existed.
+    #[serde(default)]
+    pub auth: Option<AuthConfig>,
 
     #[serde(default)]
     pub sites: Vec<SiteConfig>,
@@ -43,6 +51,62 @@ impl Default for ServerConfig {
             live_reload: true,
             log_level: default_log_level(),
         }
+    }
+}
+
+/// `[auth]` section. Presence alone does not enable auth; `mdshelf serve --auth google`
+/// (or `provider` set here plus `enabled`) turns it on. Credentials are never read from
+/// this file — they come from the environment (D14).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthConfig {
+    /// Identity provider. Only "google" is supported.
+    #[serde(default = "default_auth_provider")]
+    pub provider: String,
+
+    /// Absolute ceiling on a session before full re-authentication (D26).
+    #[serde(default = "default_session_max_age")]
+    pub session_max_age: String,
+
+    /// Address used for the `mailto:` request-access link on the deny page (D24).
+    #[serde(default)]
+    pub owner_email: Option<String>,
+
+    /// How long access-log entries are retained before pruning (D27).
+    #[serde(default = "default_audit_retention")]
+    pub audit_retention: String,
+
+    /// Path to the SQLite sidecar. Defaults to `mdshelf.db` beside the config file.
+    #[serde(default)]
+    pub database: Option<PathBuf>,
+
+    /// Path to the AEAD key file. Defaults to `~/.mdshelf/secret.key` (D19).
+    #[serde(default)]
+    pub key_file: Option<PathBuf>,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_auth_provider(),
+            session_max_age: default_session_max_age(),
+            owner_email: None,
+            audit_retention: default_audit_retention(),
+            database: None,
+            key_file: None,
+        }
+    }
+}
+
+impl AuthConfig {
+    /// Parsed `session_max_age`. Validated at load time, so this cannot fail later.
+    pub fn session_max_age(&self) -> Duration {
+        parse_duration(&self.session_max_age).unwrap_or(DEFAULT_SESSION_MAX_AGE)
+    }
+
+    /// Parsed `audit_retention`. Validated at load time.
+    pub fn audit_retention(&self) -> Duration {
+        parse_duration(&self.audit_retention).unwrap_or(DEFAULT_AUDIT_RETENTION)
     }
 }
 
@@ -86,6 +150,57 @@ fn default_true() -> bool {
 }
 fn default_log_level() -> String {
     "info".to_string()
+}
+fn default_auth_provider() -> String {
+    "google".to_string()
+}
+fn default_session_max_age() -> String {
+    "30d".to_string()
+}
+fn default_audit_retention() -> String {
+    "90d".to_string()
+}
+
+const DEFAULT_SESSION_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const DEFAULT_AUDIT_RETENTION: Duration = Duration::from_secs(90 * 24 * 60 * 60);
+
+/// Parse a duration written as `<integer><unit>`, where unit is one of `s`, `m`, `h`, `d`, `w`.
+/// Deliberately strict: a bare number or an unknown unit is an error rather than a guess,
+/// because these values govern how long a session stays valid.
+pub fn parse_duration(raw: &str) -> Result<Duration> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        bail!("duration is empty; expected a value such as `30d`");
+    }
+    let split_at = trimmed
+        .find(|c: char| !c.is_ascii_digit())
+        .ok_or_else(|| anyhow!("duration `{}` has no unit; expected e.g. `30d`", raw))?;
+    if split_at == 0 {
+        bail!(
+            "duration `{}` does not start with a number; expected e.g. `30d`",
+            raw
+        );
+    }
+    let (number, unit) = trimmed.split_at(split_at);
+    let value: u64 = number
+        .parse()
+        .with_context(|| format!("duration `{}` has an invalid number", raw))?;
+    let seconds_per_unit = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 60 * 60,
+        "d" => 24 * 60 * 60,
+        "w" => 7 * 24 * 60 * 60,
+        other => bail!(
+            "duration `{}` has unknown unit `{}`; use one of s, m, h, d, w",
+            raw,
+            other
+        ),
+    };
+    let seconds = value
+        .checked_mul(seconds_per_unit)
+        .ok_or_else(|| anyhow!("duration `{}` overflows", raw))?;
+    Ok(Duration::from_secs(seconds))
 }
 
 impl Config {
@@ -140,6 +255,31 @@ impl Config {
             bail!("config defines no [[sites]]; nothing to serve.");
         }
 
+        if let Some(auth) = self.auth.as_mut() {
+            if auth.provider != "google" {
+                bail!(
+                    "[auth] provider `{}` is not supported; only `google` is available.",
+                    auth.provider
+                );
+            }
+            parse_duration(&auth.session_max_age).context("[auth] session_max_age is invalid")?;
+            parse_duration(&auth.audit_retention).context("[auth] audit_retention is invalid")?;
+            if let Some(owner) = auth.owner_email.as_deref()
+                && !is_valid_email(owner)
+            {
+                bail!(
+                    "[auth] owner_email `{}` is not a valid email address",
+                    owner
+                );
+            }
+            if let Some(database) = auth.database.as_mut() {
+                *database = expand_and_resolve(database, &self.source_dir)?;
+            }
+            if let Some(key_file) = auth.key_file.as_mut() {
+                *key_file = expand_and_resolve(key_file, &self.source_dir)?;
+            }
+        }
+
         if let Some(dir) = self.theme.directory.as_mut() {
             *dir = expand_and_resolve(dir, &self.source_dir)?;
         }
@@ -155,7 +295,7 @@ impl Config {
             "#d946ef", // Fuchsia
             "#6366f1", // Indigo
         ];
-        
+
         let mut seen = HashSet::new();
         for (i, site) in self.sites.iter_mut().enumerate() {
             site.path = expand_and_resolve(&site.path, &self.source_dir)?;
@@ -182,7 +322,7 @@ impl Config {
             if site.title.is_none() {
                 site.title = Some(derive_title(&site.path));
             }
-            
+
             if site.color.is_none() {
                 site.color = Some(palette[i % palette.len()].to_string());
             }
@@ -192,6 +332,40 @@ impl Config {
 
     pub fn bind_addr(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Config {
+    /// Build a validated config around an existing directory, for tests.
+    pub fn for_test(source_dir: PathBuf, sites: Vec<SiteConfig>) -> Self {
+        let mut config = Self {
+            host: default_host(),
+            port: default_port(),
+            server: ServerConfig::default(),
+            theme: ThemeConfig::default(),
+            auth: None,
+            sites,
+            source_dir,
+        };
+        config
+            .normalize_and_validate()
+            .expect("test config should validate");
+        config
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl SiteConfig {
+    /// A site rooted at `path`, mounted at `/docs`.
+    pub fn for_test(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            mount: Some("/docs".to_string()),
+            title: Some("Docs".to_string()),
+            theme: None,
+            color: None,
+        }
     }
 }
 
@@ -295,4 +469,131 @@ pub fn normalize_mount(mount: &str) -> Result<String> {
         }
     }
     Ok(collapsed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Write a config file plus a content directory, and load it.
+    fn load_config(toml_body: &str) -> Result<Config> {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("content")).expect("content dir");
+        let config_path = dir.path().join("mdshelf.toml");
+        let body = format!("{toml_body}\n\n[[sites]]\npath = \"content\"\nmount = \"/docs\"\n");
+        std::fs::write(&config_path, body).expect("writing config");
+        Config::load(Some(&config_path))
+    }
+
+    /// The full anyhow chain, since the useful detail is often in a source error.
+    fn load_error(toml_body: &str) -> String {
+        match load_config(toml_body) {
+            Ok(_) => panic!("expected this config to be refused:\n{toml_body}"),
+            Err(error) => format!("{error:#}"),
+        }
+    }
+
+    #[test]
+    fn auth_section_is_optional() {
+        let config = load_config("").expect("a config without [auth] must load");
+        assert!(config.auth.is_none());
+    }
+
+    #[test]
+    fn auth_section_parses_every_field() {
+        let config = load_config(
+            r#"
+[auth]
+provider = "google"
+session_max_age = "7d"
+owner_email = "owner@corp.com"
+audit_retention = "30d"
+"#,
+        )
+        .expect("a full [auth] section must load");
+
+        let auth = config.auth.expect("[auth] present");
+        assert_eq!(auth.provider, "google");
+        assert_eq!(auth.session_max_age(), Duration::from_secs(7 * 86_400));
+        assert_eq!(auth.audit_retention(), Duration::from_secs(30 * 86_400));
+        assert_eq!(auth.owner_email.as_deref(), Some("owner@corp.com"));
+    }
+
+    #[test]
+    fn auth_defaults_are_applied() {
+        let config = load_config("[auth]\n").expect("an empty [auth] must load");
+        let auth = config.auth.expect("[auth] present");
+        assert_eq!(auth.session_max_age(), Duration::from_secs(30 * 86_400));
+        assert_eq!(auth.audit_retention(), Duration::from_secs(90 * 86_400));
+    }
+
+    #[test]
+    fn invalid_session_max_age_is_a_startup_error() {
+        for bad in ["forever", "30", "30y", ""] {
+            let err = load_error(&format!("[auth]\nsession_max_age = \"{bad}\"\n"));
+            assert!(
+                err.contains("session_max_age"),
+                "the error should name the field; got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_audit_retention_is_a_startup_error() {
+        let err = load_error("[auth]\naudit_retention = \"soon\"\n");
+        assert!(err.contains("audit_retention"), "got: {err}");
+    }
+
+    #[test]
+    fn unsupported_provider_is_refused() {
+        let err = load_error("[auth]\nprovider = \"okta\"\n");
+        assert!(err.contains("okta"), "got: {err}");
+    }
+
+    #[test]
+    fn invalid_owner_email_is_refused() {
+        // owner_email becomes a mailto: link on the deny page, so a typo would send
+        // access requests into the void.
+        let err = load_error("[auth]\nowner_email = \"owner@corp\"\n");
+        assert!(err.contains("owner_email"), "got: {err}");
+    }
+
+    #[test]
+    fn unknown_auth_keys_are_refused() {
+        // deny_unknown_fields must still hold, so a misspelled security-relevant key
+        // fails loudly instead of being silently ignored.
+        let err = load_error("[auth]\nsession_max_ago = \"30d\"\n");
+        assert!(err.contains("session_max_ago"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_duration_accepts_every_unit() {
+        assert_eq!(parse_duration("45s").unwrap(), Duration::from_secs(45));
+        assert_eq!(parse_duration("30m").unwrap(), Duration::from_secs(1_800));
+        assert_eq!(parse_duration("12h").unwrap(), Duration::from_secs(43_200));
+        assert_eq!(
+            parse_duration("30d").unwrap(),
+            Duration::from_secs(2_592_000)
+        );
+        assert_eq!(
+            parse_duration("2w").unwrap(),
+            Duration::from_secs(1_209_600)
+        );
+        assert_eq!(
+            parse_duration(" 7d ").unwrap(),
+            Duration::from_secs(604_800)
+        );
+    }
+
+    #[test]
+    fn parse_duration_rejects_ambiguous_values() {
+        // A bare number is refused rather than assumed to be seconds: the difference
+        // between 30 seconds and 30 days of session validity is not a guess worth making.
+        assert!(parse_duration("30").is_err());
+        assert!(parse_duration("").is_err());
+        assert!(parse_duration("d30").is_err());
+        assert!(parse_duration("30y").is_err());
+        assert!(parse_duration("-5d").is_err());
+        assert!(parse_duration("18446744073709551615w").is_err());
+    }
 }

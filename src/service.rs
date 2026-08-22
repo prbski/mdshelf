@@ -143,9 +143,7 @@ pub fn status(args: ServiceNameArgs) -> Result<()> {
 /// PATH entry (e.g. `/opt/homebrew/bin/mdshelf`) so the service automatically
 /// picks up upgrades on restart without needing to be reinstalled.
 fn resolve_executable_path() -> Result<PathBuf> {
-    let arg0 = std::env::args_os()
-        .next()
-        .context("argv[0] is missing")?;
+    let arg0 = std::env::args_os().next().context("argv[0] is missing")?;
     let path = PathBuf::from(&arg0);
 
     if path.is_absolute() {

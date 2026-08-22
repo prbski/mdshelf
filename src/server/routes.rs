@@ -11,10 +11,14 @@ use axum::{
 use tower::ServiceBuilder;
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 
+use axum_extra::extract::cookie::CookieJar;
+
+use crate::auth::SessionOutcome;
+use crate::auth::store::Outcome;
 use crate::content::page::{humanize, join_url};
 use crate::content::tree::{breadcrumbs, breadcrumbs_for_index_path, prev_next};
 use crate::content::{
-    Page, Site, Universe, build_site_index_context, build_site_index_under_prefix,
+    Page, Site, SiteView, Universe, build_site_index_context, build_site_index_under_prefix,
 };
 use crate::render::templates::{
     ConfigSummary, Crumb, ErrorTemplateContext, HomeTemplateContext, NeighborContext, PageContext,
@@ -25,11 +29,19 @@ use crate::server::error::AppError;
 use crate::server::livereload;
 
 pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route("/", get(home))
         .route("/__mdshelf/syntax.css", get(syntax_css))
         .route("/__assets/{*asset_path}", get(theme_asset))
-        .route("/__livereload", get(livereload::livereload_ws))
+        .route("/__livereload", get(livereload::livereload_ws));
+
+    // The `/auth/*` endpoints exist only when auth is enabled, so an unauthenticated
+    // server exposes exactly the surface it did before (NFR-2).
+    if state.auth_enabled() {
+        router = router.merge(crate::auth::routes::router());
+    }
+
+    router
         .route("/{*rest}", get(site_or_not_found))
         .layer(
             ServiceBuilder::new()
@@ -39,11 +51,27 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-async fn home(State(state): State<Arc<AppState>>) -> Result<Response, AppError> {
+async fn home(State(state): State<Arc<AppState>>, jar: CookieJar) -> Result<Response, AppError> {
+    // The home page enumerates every configured site and how many pages each holds.
+    // It needs the same gate as any other page, or it becomes the one URL that
+    // describes the whole server to anyone who asks.
+    let viewer = resolve_viewer(&state, &jar).await;
+    if matches!(viewer, Viewer::Anonymous) {
+        return Ok(interstitial_response(&state));
+    }
+
     let all_sites = {
         let universe = state.universe.read().await;
-        site_list_entries(&universe)
+        site_list_entries_for(&universe, viewer.email())
     };
+
+    // A signed-in viewer with access to nothing must not be able to tell an empty
+    // server from one whose contents are simply not theirs (D23).
+    if let Viewer::Signed(email) = &viewer
+        && all_sites.is_empty()
+    {
+        return Ok(denied_response(&state, email));
+    }
     let ctx = HomeTemplateContext {
         all_sites,
         config: config_summary(&state),
@@ -89,20 +117,115 @@ async fn theme_asset(
     Ok((headers, resolved.bytes).into_response())
 }
 
+/// Who is making a request.
+#[derive(Debug, Clone)]
+pub enum Viewer {
+    /// Authorization is not in force on this server (NFR-2).
+    Unrestricted,
+    /// No usable session; the visitor sees the interstitial for every path (SEC-9).
+    Anonymous,
+    /// A live session belonging to this verified address.
+    Signed(String),
+}
+
+impl Viewer {
+    /// The address to resolve ACLs against, or `None` when nothing is enforced.
+    fn email(&self) -> Option<&str> {
+        match self {
+            Viewer::Unrestricted => None,
+            Viewer::Anonymous => None,
+            Viewer::Signed(email) => Some(email.as_str()),
+        }
+    }
+}
+
+async fn resolve_viewer(state: &AppState, jar: &CookieJar) -> Viewer {
+    let Some(runtime) = state.auth.as_ref() else {
+        return Viewer::Unrestricted;
+    };
+    let Some(cookie) = jar.get(crate::auth::SESSION_COOKIE) else {
+        return Viewer::Anonymous;
+    };
+    match runtime.resolve_session(cookie.value()).await {
+        SessionOutcome::Active(email) => Viewer::Signed(email),
+        SessionOutcome::Anonymous => Viewer::Anonymous,
+    }
+}
+
+/// The sign-in interstitial, served for any path an anonymous visitor asks for.
+fn interstitial_response(state: &AppState) -> Response {
+    let site_name = state
+        .config
+        .sites
+        .first()
+        .and_then(|site| site.title.clone())
+        .unwrap_or_else(|| "Private site".to_string());
+    (
+        StatusCode::UNAUTHORIZED,
+        Html(crate::auth::pages::interstitial(&site_name)),
+    )
+        .into_response()
+}
+
+/// The unified deny page (D23).
+///
+/// Answers both "you may not read this" and "this does not exist" with the same bytes
+/// and the same status, so the response cannot be used to enumerate the vault.
+fn denied_response(state: &AppState, email: &str) -> Response {
+    let owner = state
+        .auth
+        .as_ref()
+        .and_then(|runtime| runtime.settings.owner_email.as_deref());
+    (
+        StatusCode::NOT_FOUND,
+        Html(crate::auth::pages::denied(email, owner)),
+    )
+        .into_response()
+}
+
+/// Record the outcome of a request against the access log (US-21).
+fn log_access(state: &AppState, viewer: &Viewer, path: &str, outcome: Outcome) {
+    let (Some(runtime), Viewer::Signed(email)) = (state.auth.as_ref(), viewer) else {
+        return;
+    };
+    if let Err(error) = runtime
+        .store
+        .log_access(email, path, crate::auth::store::now_ms(), outcome)
+    {
+        // Losing an audit row must never cost the reader their page.
+        tracing::warn!(%error, "failed to record an access-log entry");
+    }
+}
+
 async fn site_or_not_found(
     State(state): State<Arc<AppState>>,
+    jar: CookieJar,
     uri: Uri,
 ) -> Result<Response, AppError> {
     let raw_path = uri.path();
     if raw_path.starts_with("/__") {
         return Err(AppError::not_found("not found"));
     }
+
+    let viewer = resolve_viewer(&state, &jar).await;
+    if matches!(viewer, Viewer::Anonymous) {
+        // SEC-9: every path, existing or not, so the interstitial itself reveals nothing.
+        return Ok(interstitial_response(&state));
+    }
+
     let path = raw_path.trim_end_matches('/');
     let matched = {
         let universe = state.universe.read().await;
         match_site_path(&universe, path)
     };
+
     let Some((site, tail, all_sites)) = matched else {
+        // A path under no configured site. For a signed-in viewer this must be
+        // indistinguishable from a path they simply may not read (D23).
+        if let Viewer::Signed(email) = &viewer {
+            log_access(&state, &viewer, raw_path, Outcome::Deny);
+            return Ok(denied_response(&state, email));
+        }
         let body = render_error_page(
             &state,
             404,
@@ -112,7 +235,7 @@ async fn site_or_not_found(
         .await?;
         return Ok((StatusCode::NOT_FOUND, Html(body)).into_response());
     };
-    serve_site_request(&state, site, &tail, &all_sites).await
+    serve_site_request(&state, site, &tail, &all_sites, &viewer, raw_path).await
 }
 
 fn match_site_path(
@@ -143,11 +266,36 @@ async fn serve_site_request(
     site: Arc<Site>,
     tail: &str,
     all_sites: &[SiteListEntry],
+    viewer: &Viewer,
+    request_path: &str,
 ) -> Result<Response, AppError> {
     let normalized = normalize_tail(tail);
 
-    if normalized.trim().is_empty() && site.page("").is_none() {
-        let site_index = build_site_index_context(site.pages_map(), site.root.as_path());
+    // Everything below reads from `view`, the viewer's projection of the site. A page,
+    // navigation entry, or index row that is not in it cannot be rendered by any code
+    // path here (US-16, US-17).
+    let view = site.view(viewer.email());
+
+    // Anything that does not produce a real, permitted page for a signed-in viewer ends
+    // at the same deny page, so "restricted" and "missing" are indistinguishable (D23).
+    let deny = |state: &Arc<AppState>| -> Option<Response> {
+        match viewer {
+            Viewer::Signed(email) => Some(denied_response(state, email)),
+            _ => None,
+        }
+    };
+
+    if normalized.trim().is_empty() && view.page("").is_none() {
+        // With auth on, an auto-generated listing of the whole site is exactly the
+        // enumeration surface D23 exists to close — but built from the filtered view it
+        // lists only what this viewer may already read.
+        if view.pages().next().is_none()
+            && let Some(response) = deny(state)
+        {
+            log_access(state, viewer, request_path, Outcome::Deny);
+            return Ok(response);
+        }
+        let site_index = build_site_index_context(view.pages_map(), site.root.as_path());
         let root_url = join_url(site.mount.as_str(), "");
         let ctx = PageTemplateContext {
             site: SiteContext {
@@ -170,7 +318,7 @@ async fn serve_site_request(
                 frontmatter: serde_json::json!({}),
                 html: String::new(),
             },
-            nav_flat: site.nav_flat(),
+            nav_flat: view.nav_flat(),
             breadcrumbs: vec![Crumb {
                 title: site.title.clone(),
                 url: root_url,
@@ -190,17 +338,24 @@ async fn serve_site_request(
         return Ok(Html(html).into_response());
     }
 
-    if let Some(page) = resolve_markdown_page(&site, &normalized) {
+    if let Some(page) = resolve_markdown_page(&view, &normalized) {
         if page.draft {
+            // A draft is "not published", which for a signed-in viewer must look the
+            // same as everything else they cannot read (D23).
+            if let Some(response) = deny(state) {
+                log_access(state, viewer, request_path, Outcome::Deny);
+                return Ok(response);
+            }
             return Err(AppError::not_found("draft"));
         }
+        log_access(state, viewer, request_path, Outcome::Allow);
         let crumbs = breadcrumbs(
             site.title.as_str(),
             site.mount.as_str(),
-            site.pages_map(),
+            view.pages_map(),
             page,
         );
-        let (prev_page, next_page) = prev_next(site.pages_map(), page);
+        let (prev_page, next_page) = prev_next(view.pages_map(), page);
         let prev = prev_page.map(|p| NeighborContext {
             title: p.title.clone(),
             url: p.url.clone(),
@@ -227,7 +382,7 @@ async fn serve_site_request(
                 frontmatter: page.frontmatter.clone(),
                 html: page.html.clone(),
             },
-            nav_flat: site.nav_flat(),
+            nav_flat: view.nav_flat(),
             breadcrumbs: crumbs,
             prev,
             next,
@@ -247,7 +402,7 @@ async fn serve_site_request(
     let folder_key = normalized.trim_matches('/').to_string();
     if !folder_key.is_empty() {
         if let Some(folder_site_index) = build_site_index_under_prefix(
-            site.pages_map(),
+            view.pages_map(),
             folder_key.as_str(),
             site.root.as_path(),
         ) {
@@ -260,7 +415,7 @@ async fn serve_site_request(
             let crumbs = breadcrumbs_for_index_path(
                 site.title.as_str(),
                 site.mount.as_str(),
-                site.pages_map(),
+                view.pages_map(),
                 folder_key.as_str(),
                 synthetic_title.as_str(),
             );
@@ -285,7 +440,7 @@ async fn serve_site_request(
                     frontmatter: serde_json::json!({}),
                     html: String::new(),
                 },
-                nav_flat: site.nav_flat(),
+                nav_flat: view.nav_flat(),
                 breadcrumbs: crumbs,
                 prev: None,
                 next: None,
@@ -299,18 +454,37 @@ async fn serve_site_request(
                 renderer.render_page(&ctx).map_err(AppError::from)?
             };
             html = inject_live_reload(html, state.live_reload_enabled);
+            log_access(state, viewer, request_path, Outcome::Allow);
             return Ok(Html(html).into_response());
         }
     }
 
-    if let Some(file_path) = resolve_static_file(&site, &normalized) {
+    // US-18/SEC-8. Attachments and raw files bypass page rendering entirely, so the
+    // check has to be repeated here. A gated page whose images load anyway is not a
+    // gated page.
+    if let Some((file_path, rel_path)) = resolve_static_file(&site, &normalized) {
+        if !site.allows_path(&rel_path, viewer.email()) {
+            if let Some(response) = deny(state) {
+                log_access(state, viewer, request_path, Outcome::Deny);
+                return Ok(response);
+            }
+            return Err(AppError::not_found("not found"));
+        }
         let bytes = tokio::fs::read(&file_path)
             .await
             .map_err(|e| AppError::from(anyhow::anyhow!(e)))?;
         let mime = content_type_for_path(&file_path);
         let mut headers = HeaderMap::new();
         headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
+        log_access(state, viewer, request_path, Outcome::Allow);
         return Ok((headers, bytes).into_response());
+    }
+
+    // Nothing matched. For a signed-in viewer this is the same answer as "you may not
+    // read that", which is the whole of D23.
+    if let Some(response) = deny(state) {
+        log_access(state, viewer, request_path, Outcome::Deny);
+        return Ok(response);
     }
 
     let not_found_message = format!("No page or file at `{}`.", tail);
@@ -318,21 +492,21 @@ async fn serve_site_request(
     Ok((StatusCode::NOT_FOUND, Html(err_html)).into_response())
 }
 
-fn resolve_markdown_page<'a>(site: &'a Site, normalized: &str) -> Option<&'a Page> {
+fn resolve_markdown_page<'a>(view: &'a SiteView, normalized: &str) -> Option<&'a Page> {
     let rel = normalized.trim_matches('/');
     if rel.is_empty() {
-        return site.page("");
+        return view.page("");
     }
     let rel_lower = rel.to_ascii_lowercase();
     if rel_lower.ends_with(".md") {
         let key = strip_md_url_suffix(rel);
-        return site.page(&key);
+        return view.page(&key);
     }
-    if let Some(page) = site.page(rel) {
+    if let Some(page) = view.page(rel) {
         return Some(page);
     }
     let with_index = format!("{}/index", rel);
-    site.page(&with_index)
+    view.page(&with_index)
 }
 
 fn strip_md_url_suffix(rel: &str) -> String {
@@ -342,11 +516,13 @@ fn strip_md_url_suffix(rel: &str) -> String {
         .unwrap_or_else(|| rel.to_string())
 }
 
-fn resolve_static_file(site: &Site, normalized: &str) -> Option<PathBuf> {
+/// Resolve a static file, returning both its absolute path and the site-relative path
+/// the ACL is evaluated against.
+fn resolve_static_file(site: &Site, normalized: &str) -> Option<(PathBuf, PathBuf)> {
     let rel = safe_relative_path(normalized)?;
     let full = site.root.join(&rel);
     if full.is_file() {
-        return Some(full);
+        return Some((full, rel));
     }
     None
 }
@@ -380,18 +556,34 @@ fn safe_relative_path(raw: &str) -> Option<PathBuf> {
     }
 }
 
-fn site_list_entries(universe: &Universe) -> Vec<SiteListEntry> {
+/// The site switcher shown on every page.
+///
+/// `page_count` is computed from the viewer's own projection: the raw total would tell
+/// a reader how many pages exist in a site they can only partly see, which is exactly
+/// the kind of structural detail D11 keeps confidential. Sites with nothing visible are
+/// omitted entirely.
+fn site_list_entries_for(universe: &Universe, viewer: Option<&str>) -> Vec<SiteListEntry> {
     universe
         .sites()
         .iter()
-        .map(|site| SiteListEntry {
-            title: site.title.clone(),
-            mount: site.mount.clone(),
-            url: site.mount.clone(),
-            page_count: site.pages().count(),
-            color: site.color.clone(),
+        .filter_map(|site| {
+            let page_count = site.view(viewer).pages().count();
+            if viewer.is_some() && page_count == 0 {
+                return None;
+            }
+            Some(SiteListEntry {
+                title: site.title.clone(),
+                mount: site.mount.clone(),
+                url: site.mount.clone(),
+                page_count,
+                color: site.color.clone(),
+            })
         })
         .collect()
+}
+
+fn site_list_entries(universe: &Universe) -> Vec<SiteListEntry> {
+    site_list_entries_for(universe, None)
 }
 
 fn config_summary(state: &AppState) -> ConfigSummary {
