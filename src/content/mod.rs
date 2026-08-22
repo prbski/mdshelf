@@ -3,7 +3,7 @@ pub mod site_index;
 pub mod source;
 pub mod tree;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -46,7 +46,49 @@ pub struct Site {
     /// access share one entry. The cache lives and dies with the `Site`, so any content
     /// or rule change discards it wholesale when the universe is rebuilt.
     #[serde(skip)]
-    views: RwLock<HashMap<String, Arc<SiteView>>>,
+    views: RwLock<ViewCache>,
+}
+
+/// How many distinct viewer projections to keep.
+///
+/// Each entry is a filtered copy of the page map, so the cache costs roughly
+/// (distinct access profiles) × (rendered vault size) — measured at ~19 MB for a 660 KB
+/// vault across 30 profiles. Unbounded, a vault with per-person rules and a few hundred
+/// readers would grow it into gigabytes and take the process with it.
+///
+/// This is a stability bound, not a tuning parameter. Making views cheap enough that no
+/// bound is needed (sharing pages behind an `Arc` instead of cloning them) is the real
+/// fix, and is deferred with the rest of the performance work under D30.
+const VIEW_CACHE_CAPACITY: usize = 64;
+
+/// A bounded, insertion-ordered cache of viewer projections.
+#[derive(Debug, Default)]
+struct ViewCache {
+    entries: HashMap<String, Arc<SiteView>>,
+    /// Insertion order, so the oldest entry can be dropped when the cache is full.
+    order: VecDeque<String>,
+}
+
+impl ViewCache {
+    fn get(&self, signature: &str) -> Option<Arc<SiteView>> {
+        self.entries.get(signature).map(Arc::clone)
+    }
+
+    fn insert(&mut self, signature: String, view: Arc<SiteView>) {
+        if self.entries.contains_key(&signature) {
+            return;
+        }
+        while self.entries.len() >= VIEW_CACHE_CAPACITY {
+            match self.order.pop_front() {
+                Some(oldest) => {
+                    self.entries.remove(&oldest);
+                }
+                None => break,
+            }
+        }
+        self.order.push_back(signature.clone());
+        self.entries.insert(signature, view);
+    }
 }
 
 /// One viewer's projection of a site.
@@ -193,7 +235,7 @@ impl Site {
             nav_root,
             full_view,
             acl,
-            views: RwLock::new(HashMap::new()),
+            views: RwLock::new(ViewCache::default()),
         })
     }
 
@@ -219,7 +261,7 @@ impl Site {
         if let Ok(cache) = self.views.read()
             && let Some(existing) = cache.get(&signature)
         {
-            return Arc::clone(existing);
+            return existing;
         }
 
         let view = Arc::new(self.build_view(email));

@@ -1122,6 +1122,61 @@ async fn the_view_cache_never_serves_one_viewer_anothers_projection() {
     }
 }
 
+/// Eviction must be invisible: a viewer whose entry was dropped still sees exactly
+/// their own pages, rebuilt on demand.
+///
+/// The cache is bounded because it costs roughly (distinct access profiles) × (rendered
+/// vault size) — ~19 MB for a 660 KB vault across 30 profiles — and a vault with
+/// per-person rules and a few hundred readers would otherwise grow it without limit.
+/// A cache that changes answers under pressure would be far worse than an unbounded one,
+/// so this drives 100 distinct profiles through a 64-entry cache and re-checks them all.
+#[tokio::test]
+async fn evicting_a_cached_view_does_not_change_what_a_viewer_sees() {
+    const PROFILES: usize = 100;
+
+    let mut files: Vec<(String, String)> = vec![(
+        "index.md".to_string(),
+        "---\ntitle: Home\nallow:\n  - everyone@corp.com\n---\n\n# Home\n".to_string(),
+    )];
+    for i in 0..PROFILES {
+        files.push((
+            format!("f{i}/index.md"),
+            format!("---\ntitle: F{i}\nallow:\n  - u{i}@corp.com\n---\n\n# ZZ{i}ZZ\n"),
+        ));
+    }
+    let borrowed: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(path, body)| (path.as_str(), body.as_str()))
+        .collect();
+
+    let idp = MockIdp::start().await;
+    let server = TestServer::start_with_auth(&borrowed, &idp).await;
+    let universe = server.state.universe.read().await;
+    let site = &universe.sites()[0];
+
+    // Fill well past capacity, so the earliest entries are certainly gone.
+    for i in 0..PROFILES {
+        let _ = site.view(Some(&format!("u{i}@corp.com")));
+    }
+
+    for i in 0..PROFILES {
+        let view = site.view(Some(&format!("u{i}@corp.com")));
+        let own = view
+            .pages()
+            .filter(|page| page.html.contains(&format!("ZZ{i}ZZ")))
+            .count();
+        assert_eq!(own, 1, "u{i}@corp.com lost their own page after eviction");
+
+        let foreign = view
+            .pages()
+            .filter(|page| {
+                (0..PROFILES).any(|other| other != i && page.html.contains(&format!("ZZ{other}ZZ")))
+            })
+            .count();
+        assert_eq!(foreign, 0, "u{i}@corp.com gained another viewer's page");
+    }
+}
+
 /// A warm cache must not survive a rule change.
 ///
 /// The cache lives on `Site`, and a rebuild replaces the whole `Universe`, so this
