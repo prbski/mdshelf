@@ -60,6 +60,16 @@ impl Page {
         let raw = std::fs::read_to_string(&fs_path)
             .with_context(|| format!("reading {}", fs_path.display()))?;
 
+        // Strip a UTF-8 byte-order mark before anything looks at the text.
+        //
+        // Notepad and older PowerShell write one by default, and it is invisible in
+        // every editor. Left in place it hides the opening `---` from the frontmatter
+        // parser, so the file appears to have no frontmatter at all — which means its
+        // `allow`/`deny` rules are silently ignored and the file inherits whatever a
+        // broader rule grants. That is a fail-open, and the one outcome this feature
+        // must never produce.
+        let raw = raw.strip_prefix('\u{feff}').unwrap_or(&raw).to_string();
+
         let matter = Matter::<YAML>::new();
         let parsed: ParsedEntity<JsonValue> = matter
             .parse(&raw)

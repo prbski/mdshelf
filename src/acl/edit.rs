@@ -16,6 +16,14 @@ const FRONTMATTER_FENCE: &str = "---";
 /// Returns `Ok(None)` when the address is already listed, so the caller can report
 /// "already granted" rather than writing an identical file.
 pub fn add_to_allow_list(source: &str, email: &str) -> Result<Option<String>> {
+    // A byte-order mark is invisible, survives round-trips through editors, and would
+    // otherwise hide the opening fence from the scan below — leaving a file whose rules
+    // mdshelf reads happily but refuses to edit. Strip it here, restore it on the way out.
+    let (bom, source) = match source.strip_prefix('\u{feff}') {
+        Some(rest) => ("\u{feff}", rest),
+        None => ("", source),
+    };
+
     let line_ending = if source.contains("\r\n") {
         "\r\n"
     } else {
@@ -48,12 +56,14 @@ pub fn add_to_allow_list(source: &str, email: &str) -> Result<Option<String>> {
         for line in &lines[close..] {
             out.push_str(line);
         }
-        return Ok(Some(out));
+        return Ok(Some(format!("{bom}{out}")));
     };
 
+    // `allow:  # who may read` is ordinary YAML — the comment is not the value, and the
+    // list follows on the next lines. Reading it as a scalar rejected a legal file.
     let value = lines[allow_index]
         .split_once(':')
-        .map(|(_, rest)| rest.trim())
+        .map(|(_, rest)| strip_trailing_comment(rest))
         .unwrap_or_default();
 
     // An inline list (`allow: [a@x.com]`) is rewritten in place, keeping it inline.
@@ -85,7 +95,7 @@ pub fn add_to_allow_list(source: &str, email: &str) -> Result<Option<String>> {
                 out.push_str(line);
             }
         }
-        return Ok(Some(out));
+        return Ok(Some(format!("{bom}{out}")));
     }
 
     if !value.is_empty() {
@@ -102,6 +112,11 @@ pub fn add_to_allow_list(source: &str, email: &str) -> Result<Option<String>> {
     let mut indent = "  - ".to_string();
     for (index, line) in lines.iter().enumerate().take(close).skip(allow_index + 1) {
         let trimmed = line.trim_start();
+        // A comment sits with the entry it describes, so scanning past it keeps the new
+        // address at the end of the list rather than wedged above someone's note.
+        if trimmed.starts_with('#') {
+            continue;
+        }
         if trimmed.starts_with('-') {
             if trimmed
                 .trim_end()
@@ -130,7 +145,19 @@ pub fn add_to_allow_list(source: &str, email: &str) -> Result<Option<String>> {
             out.push_str(line_ending);
         }
     }
-    Ok(Some(out))
+    Ok(Some(format!("{bom}{out}")))
+}
+
+/// Drop a trailing `# …` comment from a YAML value, leaving the value itself.
+fn strip_trailing_comment(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    if trimmed.starts_with('#') {
+        return "";
+    }
+    match trimmed.split_once(" #") {
+        Some((value, _)) => value.trim(),
+        None => trimmed,
+    }
 }
 
 fn ensure_trailing_newline(buffer: &mut String, line_ending: &str) {
@@ -231,6 +258,40 @@ mod tests {
         let updated = add_to_allow_list(source, "bob@corp.com").unwrap().unwrap();
         assert!(updated.contains("  - bob@corp.com\r\n"));
         assert!(!updated.contains("  - bob@corp.com\n\r"));
+    }
+
+    #[test]
+    fn handles_a_byte_order_mark_and_preserves_it() {
+        let source = "\u{feff}---\ntitle: T\nallow:\n  - ana@corp.com\n---\n";
+        let updated = add_to_allow_list(source, "bob@corp.com").unwrap().unwrap();
+        assert!(
+            updated.starts_with('\u{feff}'),
+            "the BOM must survive the edit — removing it is a change the user did not ask for"
+        );
+        assert!(updated.contains("  - ana@corp.com\n  - bob@corp.com\n"));
+    }
+
+    #[test]
+    fn reads_past_a_comment_on_the_allow_line() {
+        // Legal YAML: the comment is not the value, the list follows.
+        let source = "---\nallow: # who may read this\n  - ana@corp.com\n---\n";
+        let updated = add_to_allow_list(source, "bob@corp.com").unwrap().unwrap();
+        assert!(
+            updated.contains("allow: # who may read this"),
+            "got:\n{updated}"
+        );
+        assert!(updated.contains("  - ana@corp.com\n  - bob@corp.com\n"));
+    }
+
+    #[test]
+    fn appends_after_a_comment_between_entries() {
+        let source = "---\nallow:\n  - ana@corp.com\n  # the contractor\n  - dan@corp.com\n---\n";
+        let updated = add_to_allow_list(source, "bob@corp.com").unwrap().unwrap();
+        // The comment stays with the entry it describes, and the new address goes last.
+        assert!(
+            updated.contains("  # the contractor\n  - dan@corp.com\n  - bob@corp.com\n"),
+            "got:\n{updated}"
+        );
     }
 
     #[test]

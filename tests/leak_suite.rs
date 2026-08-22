@@ -775,6 +775,51 @@ fn export_rejects_an_invalid_viewer_address() {
     );
 }
 
+/// Regression: a UTF-8 byte-order mark silently disabled a file's access rules.
+///
+/// Notepad and older PowerShell write a BOM by default and it is invisible in every
+/// editor. It hid the opening `---` from the frontmatter parser, so the file looked
+/// like it had no frontmatter at all — its `deny` was ignored and it inherited whatever
+/// a broader rule granted. A **fail-open**, and the only one found in this feature.
+#[tokio::test]
+async fn a_byte_order_mark_does_not_disable_a_files_rules() {
+    let vault: &[(&str, &str)] = &[
+        (
+            "index.md",
+            "---\ntitle: Home\nallow:\n  - team@corp.com\n---\n\n# Home\n",
+        ),
+        // Byte-for-byte what Notepad would save.
+        (
+            "bom-denied.md",
+            "\u{feff}---\ntitle: Secret\ndeny:\n  - team@corp.com\n---\n\n# ZZBOMSECRETZZ\n",
+        ),
+        (
+            "bom-allowed.md",
+            "\u{feff}---\ntitle: Shared\nallow:\n  - team@corp.com\n---\n\n# ZZBOMSHAREDZZ\n",
+        ),
+    ];
+
+    let idp = MockIdp::start().await;
+    let server = TestServer::start_with_auth(vault, &idp).await;
+    let team = sign_in(&server, &idp, "team@corp.com").await;
+
+    // The deny must bite, exactly as it would without the BOM.
+    let denied = get_as(&server, &team, "/docs/bom-denied").await;
+    assert_eq!(denied.status(), 404, "a BOM must not disable a deny rule");
+    assert!(!denied.text().await.expect("body").contains("ZZBOMSECRETZZ"));
+
+    // ...and the file's other frontmatter must still work, so the fix is a parse fix
+    // and not a blanket refusal to read BOM files.
+    let allowed = get_as(&server, &team, "/docs/bom-allowed").await;
+    assert_eq!(allowed.status(), 200);
+    let body = allowed.text().await.expect("body");
+    assert!(body.contains("ZZBOMSHAREDZZ"));
+    assert!(
+        body.contains("Shared"),
+        "the title from BOM-prefixed frontmatter should still be read"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The per-viewer view cache (D12)
 // ---------------------------------------------------------------------------
