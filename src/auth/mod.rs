@@ -70,12 +70,11 @@ impl Credentials {
     }
 }
 
-/// Where `mdshelf auth setup` stores credentials.
+/// Where `mdshelf auth setup` stores credentials: `~/.config/mdshelf/credentials.env`.
 pub fn credentials_file() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
-    Ok(home.join(".mdshelf/credentials.env"))
+    Ok(crate::config::user_config_dir()
+        .context("resolving where to store credentials")?
+        .join("credentials.env"))
 }
 
 /// Parse a `KEY=value` file, ignoring blanks and comments.

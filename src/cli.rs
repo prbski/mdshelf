@@ -115,7 +115,7 @@ pub struct ServeArgs {
     #[arg(long, value_name = "EMAIL", requires = "domain")]
     pub acme_contact: Option<String>,
 
-    /// Directory for cached ACME certificates. Defaults to `~/.mdshelf/acme`.
+    /// Directory for cached ACME certificates. Defaults to `~/.config/mdshelf/acme`.
     #[arg(long, value_name = "DIR", requires = "domain")]
     pub acme_cache: Option<PathBuf>,
 

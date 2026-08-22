@@ -80,7 +80,7 @@ pub struct AuthConfig {
     #[serde(default)]
     pub database: Option<PathBuf>,
 
-    /// Path to the AEAD key file. Defaults to `~/.mdshelf/secret.key` (D19).
+    /// Path to the AEAD key file. Defaults to `~/.config/mdshelf/secret.key` (D19).
     #[serde(default)]
     pub key_file: Option<PathBuf>,
 }
@@ -391,6 +391,19 @@ fn dirs_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
+/// mdshelf's per-user directory, `~/.config/mdshelf`.
+///
+/// Everything mdshelf owns on behalf of a user lives here — the config it falls back
+/// to, the credentials written by `auth setup`, the at-rest encryption key, and the
+/// ACME cache. Deliberately *not* beside a project-local `mdshelf.toml`: that directory
+/// is frequently a git repository, and secrets do not belong in one.
+pub fn user_config_dir() -> Result<PathBuf> {
+    let home = dirs_home().ok_or_else(|| {
+        anyhow!("HOME is not set; pass an explicit path instead of relying on the default")
+    })?;
+    Ok(home.join(".config/mdshelf"))
+}
+
 fn expand_and_resolve(path: &Path, base: &Path) -> Result<PathBuf> {
     let as_str = path
         .to_str()
@@ -490,6 +503,31 @@ mod tests {
         match load_config(toml_body) {
             Ok(_) => panic!("expected this config to be refused:\n{toml_body}"),
             Err(error) => format!("{error:#}"),
+        }
+    }
+
+    /// Everything mdshelf owns per-user must sit in one directory, the same one the
+    /// config already lives in. An extra `~/.mdshelf` alongside `~/.config/mdshelf`
+    /// would be two places to look and two places to forget.
+    #[test]
+    fn per_user_paths_all_live_under_the_config_directory() {
+        let base = user_config_dir().expect("HOME is set in tests");
+        assert!(
+            base.ends_with(".config/mdshelf"),
+            "unexpected config directory: {}",
+            base.display()
+        );
+
+        for path in [
+            crate::auth::crypto::default_key_path().expect("key path"),
+            crate::auth::credentials_file().expect("credentials path"),
+        ] {
+            assert!(
+                path.starts_with(&base),
+                "{} escaped the config directory {}",
+                path.display(),
+                base.display()
+            );
         }
     }
 

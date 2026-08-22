@@ -133,10 +133,9 @@ pub fn is_loopback_host(host: &str) -> bool {
 }
 
 fn default_acme_cache() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .context("HOME is not set; pass --acme-cache explicitly")?;
-    Ok(home.join(".mdshelf/acme"))
+    Ok(crate::config::user_config_dir()
+        .context("resolving the default ACME cache; pass --acme-cache explicitly")?
+        .join("acme"))
 }
 
 /// Serve `router` under the resolved TLS mode.

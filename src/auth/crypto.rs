@@ -98,12 +98,11 @@ impl SecretKey {
     }
 }
 
-/// Default key location, `~/.mdshelf/secret.key` (D19).
+/// Default key location, `~/.config/mdshelf/secret.key` (D19).
 pub fn default_key_path() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow!("HOME is not set; pass [auth] key_file explicitly"))?;
-    Ok(home.join(".mdshelf/secret.key"))
+    Ok(crate::config::user_config_dir()
+        .context("resolving the default key file location; pass [auth] key_file explicitly")?
+        .join("secret.key"))
 }
 
 #[cfg(unix)]

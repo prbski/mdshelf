@@ -69,7 +69,7 @@ impl TestServer {
             Some(idp) => {
                 let auth_config = AuthConfig {
                     // Keep all state inside the temporary directory so tests never touch
-                    // the developer's real ~/.mdshelf.
+                    // the developer's real ~/.config/mdshelf.
                     database: Some(dir.path().join("mdshelf.db")),
                     key_file: Some(dir.path().join("secret.key")),
                     owner_email: Some("owner@corp.com".to_string()),

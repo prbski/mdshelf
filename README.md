@@ -250,7 +250,7 @@ mdshelf auth setup
 ```
 
 The wizard prints the console steps, gives you the exact redirect URI to register,
-stores the credentials in `~/.mdshelf/credentials.env` (mode 0600), and proves them
+stores the credentials in `~/.config/mdshelf/credentials.env` (mode 0600), and proves
 with a real sign-in before it exits. `MDSHELF_GOOGLE_CLIENT_ID` and
 `MDSHELF_GOOGLE_CLIENT_SECRET` override the file if you use a secret manager.
 
@@ -313,7 +313,7 @@ session_max_age = "30d"        # absolute session ceiling
 owner_email     = "owner@corp.com"  # request-access link on the deny page
 audit_retention = "90d"        # access-log retention, pruned hourly
 # database = "./mdshelf.db"    # sessions + access log; safe to delete
-# key_file = "~/.mdshelf/secret.key"  # encrypts stored refresh tokens, mode 0600
+# key_file = "~/.config/mdshelf/secret.key"  # encrypts refresh tokens, mode 0600
 ```
 
 `mdshelf.db` is derived state: deleting it costs only live sessions and access history.
