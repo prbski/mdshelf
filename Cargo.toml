@@ -89,5 +89,6 @@ axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 rcgen = "0.14.9"
 
 [dev-dependencies]
+proptest = "1.11.0"
 tempfile = "3.27.0"
 walkdir = "2.5.0"
