@@ -700,8 +700,272 @@
         popoverButton.setAttribute("aria-expanded", "false");
       }
       setSidebarOptionsOpen(false);
+      setPageActionsOpen(false);
     }
   });
+
+  /* ---------------------------------------------------------------- page actions */
+
+  const pageActionsButton = document.getElementById("page-actions-button");
+  const pageActionsMenu = document.getElementById("page-actions-menu");
+  const pageActionsStatus = document.getElementById("page-actions-status");
+  const pageActionsFallback = document.getElementById("page-actions-fallback");
+  const pageActionsFallbackText = document.getElementById("page-actions-fallback-text");
+  const pageCopyButton = document.getElementById("page-copy-md");
+  const pageDownloadButton = document.getElementById("page-download-md");
+  const pageSourceEl = document.getElementById("page-source");
+  const pageActionsPopoverWidth = 248;
+  const pageActionsPopoverGap = 10;
+  let pageActionsPortaled = false;
+  let pageActionsCloseTimer = 0;
+
+  // The inverse of the server-side escaper: on a backslash, take the next character
+  // literally. `textContent` hands back the script body unparsed, so this is the only
+  // transformation between the file on disk and the clipboard.
+  function decodePageSource(text) {
+    let out = "";
+    for (let i = 0; i < text.length; i += 1) {
+      if (text[i] === "\\" && i + 1 < text.length) {
+        i += 1;
+      }
+      out += text[i];
+    }
+    return out;
+  }
+
+  function readPageSource() {
+    return pageSourceEl ? decodePageSource(pageSourceEl.textContent) : "";
+  }
+
+  function ensurePageActionsPortal() {
+    if (!pageActionsMenu || pageActionsPortaled) {
+      return;
+    }
+    document.body.appendChild(pageActionsMenu);
+    pageActionsPortaled = true;
+  }
+
+  function positionPageActionsPopover() {
+    if (!pageActionsButton || !pageActionsMenu) {
+      return;
+    }
+    const anchor = pageActionsButton.getBoundingClientRect();
+    const menuHeight = pageActionsMenu.offsetHeight;
+    const headerOffset =
+      parseInt(getComputedStyle(document.documentElement).getPropertyValue("--header-h"), 10) || 60;
+    const edge = 12;
+
+    let top = anchor.bottom + pageActionsPopoverGap;
+    let left = anchor.right - pageActionsPopoverWidth;
+
+    if (left < edge) {
+      left = edge;
+    }
+    if (left + pageActionsPopoverWidth > window.innerWidth - edge) {
+      left = window.innerWidth - pageActionsPopoverWidth - edge;
+    }
+    if (top + menuHeight > window.innerHeight - edge) {
+      top = anchor.top - menuHeight - pageActionsPopoverGap;
+    }
+    top = Math.max(top, headerOffset + edge);
+
+    pageActionsMenu.style.top = `${Math.round(top)}px`;
+    pageActionsMenu.style.left = `${Math.round(left)}px`;
+  }
+
+  function resetPageActionsFeedback() {
+    window.clearTimeout(pageActionsCloseTimer);
+    if (pageActionsStatus) {
+      pageActionsStatus.textContent = "";
+    }
+    if (pageActionsFallback) {
+      pageActionsFallback.hidden = true;
+    }
+    if (pageCopyButton) {
+      pageCopyButton.classList.remove("is-done");
+      const label = pageCopyButton.querySelector(".page-actions-label");
+      if (label) {
+        label.textContent = "Copy as Markdown";
+      }
+    }
+  }
+
+  function setPageActionsOpen(open) {
+    if (!pageActionsButton || !pageActionsMenu) {
+      return;
+    }
+    if (open) {
+      resetPageActionsFeedback();
+      ensurePageActionsPortal();
+      pageActionsMenu.hidden = false;
+      positionPageActionsPopover();
+    } else {
+      resetPageActionsFeedback();
+      pageActionsMenu.hidden = true;
+    }
+    pageActionsButton.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  function confirmCopied() {
+    if (pageActionsStatus) {
+      pageActionsStatus.textContent = "Copied";
+    }
+    if (pageCopyButton) {
+      pageCopyButton.classList.add("is-done");
+      const label = pageCopyButton.querySelector(".page-actions-label");
+      if (label) {
+        label.textContent = "Copied";
+      }
+    }
+    // Long enough to read, short enough not to sit on top of the page being read.
+    pageActionsCloseTimer = window.setTimeout(() => setPageActionsOpen(false), 1200);
+  }
+
+  // Tier 3: neither clipboard API worked, so hand the text over and let the reader take
+  // it. Nothing else in this feature has a floor that does not depend on a browser API.
+  function offerManualCopy(source) {
+    if (!pageActionsFallback || !pageActionsFallbackText) {
+      return;
+    }
+    pageActionsFallbackText.value = source;
+    pageActionsFallback.hidden = false;
+    positionPageActionsPopover();
+    pageActionsFallbackText.focus();
+    pageActionsFallbackText.select();
+  }
+
+  // Tier 2: `navigator.clipboard` is undefined on a plain-HTTP non-loopback origin,
+  // which is exactly how mdshelf is read over Tailscale. `execCommand` is deprecated
+  // but still the only thing that works there.
+  function copyViaExecCommand(source) {
+    const scratch = document.createElement("textarea");
+    scratch.value = source;
+    scratch.setAttribute("readonly", "");
+    scratch.style.position = "fixed";
+    scratch.style.top = "-1000px";
+    scratch.style.opacity = "0";
+    document.body.appendChild(scratch);
+    scratch.select();
+    let copied = false;
+    try {
+      copied = document.execCommand("copy");
+    } catch (error) {
+      copied = false;
+    }
+    document.body.removeChild(scratch);
+    return copied;
+  }
+
+  async function copyPageSource() {
+    const source = readPageSource();
+    if (!source) {
+      return;
+    }
+    // Read synchronously above so tier 1 still runs inside this click's own user
+    // gesture: a fetch first would lose the gesture and be rejected on iOS.
+    if (navigator.clipboard && window.isSecureContext) {
+      try {
+        await navigator.clipboard.writeText(source);
+        confirmCopied();
+        return;
+      } catch (error) {
+        // Permission denied or a non-secure context that still exposes the object.
+      }
+    }
+    if (copyViaExecCommand(source)) {
+      confirmCopied();
+      return;
+    }
+    offerManualCopy(source);
+  }
+
+  // iOS and iPadOS Safari accept `a[download]` but frequently open a Blob URL in a
+  // viewer instead of saving it, so those get the server route, which sets the filename
+  // and MIME type itself. `maxTouchPoints` catches an iPad reporting a desktop UA.
+  function isIosWebkit() {
+    const ua = navigator.userAgent || "";
+    return (
+      /iPad|iPhone|iPod/.test(navigator.platform || "") ||
+      /iP(ad|hone|od)/.test(ua) ||
+      (navigator.maxTouchPoints > 1 && /Mac/.test(ua))
+    );
+  }
+
+  function downloadViaBlob(source, filename) {
+    const url = URL.createObjectURL(new Blob([source], { type: "text/markdown" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+
+  async function downloadPageSource() {
+    const source = readPageSource();
+    if (!source || !pageSourceEl) {
+      return;
+    }
+    const filename = pageSourceEl.dataset.filename || "page.md";
+    const routeUrl = pageSourceEl.dataset.mdUrl;
+
+    if (routeUrl && isIosWebkit()) {
+      try {
+        const probe = await fetch(routeUrl, { method: "HEAD" });
+        if (probe.ok) {
+          window.location.href = routeUrl;
+          setPageActionsOpen(false);
+          return;
+        }
+      } catch (error) {
+        // No server behind this page — an exported static bundle. Fall through.
+      }
+    }
+    downloadViaBlob(source, filename);
+    setPageActionsOpen(false);
+  }
+
+  if (pageActionsButton && pageActionsMenu) {
+    pageActionsButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      setPageActionsOpen(pageActionsMenu.hidden);
+    });
+
+    document.addEventListener("click", (event) => {
+      if (
+        pageActionsMenu.hidden ||
+        pageActionsButton.contains(event.target) ||
+        pageActionsMenu.contains(event.target)
+      ) {
+        return;
+      }
+      setPageActionsOpen(false);
+    });
+
+    window.addEventListener("resize", () => {
+      if (!pageActionsMenu.hidden) {
+        positionPageActionsPopover();
+      }
+    });
+
+    window.addEventListener(
+      "scroll",
+      () => {
+        if (!pageActionsMenu.hidden) {
+          positionPageActionsPopover();
+        }
+      },
+      true,
+    );
+
+    pageCopyButton?.addEventListener("click", () => {
+      copyPageSource();
+    });
+    pageDownloadButton?.addEventListener("click", () => {
+      downloadPageSource();
+    });
+  }
 
   const popoverButton = document.getElementById("site-popover-button");
   const popoverMenu = document.getElementById("site-popover-menu");

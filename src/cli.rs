@@ -47,6 +47,24 @@ pub enum Command {
     Acl(AclCommand),
     /// Query the access log: who read what, and when.
     Audit(AuditArgs),
+    /// Create, list and revoke shareable links to a single page.
+    #[command(long_about = "\
+Create, list and revoke shareable links to a single page.
+
+A link reaches exactly one page plus the files that page references, for anyone \
+holding the URL, with no sign-in. It serves only while the address it was issued for \
+can still read that page, so removing someone's access kills the links they made.
+
+The URL is printed once and cannot be recovered: mdshelf stores only sha256(token), so \
+a lost URL means creating another. Requires a server started with --auth google.
+
+  --for <DURATION>   how long the link lives (1h, 1d, 1w), capped by [links] max_lifetime
+  --until <DATE>     expire at an instant (2026-09-01, or 2026-09-01T17:00+02:00);
+                     read as UTC unless it carries an offset
+  --base-url <URL>   the origin browsers use to reach this server, when the config
+                     binds an address nobody can visit
+  --as <EMAIL>       the address the link is issued on behalf of")]
+    Share(ShareArgs),
     /// Configure Google sign-in.
     #[command(subcommand)]
     Auth(AuthCommand),
@@ -246,6 +264,96 @@ pub struct AuditArgs {
     pub forget: bool,
 }
 
+/// `mdshelf share` mints a link; `share list` and `share revoke` manage them.
+///
+/// The URL is printed once and cannot be recovered: only `sha256(token)` is stored, so
+/// a lost URL means minting another (S5).
+#[derive(Args, Debug, Clone)]
+pub struct ShareArgs {
+    #[command(subcommand)]
+    pub command: Option<ShareCommand>,
+
+    /// Page to share, as a URL (`/docs/hr/comp`) or a site-relative path
+    /// (`hr/comp.md`).
+    #[arg(value_name = "PATH")]
+    pub path: Option<String>,
+
+    /// Path to the TOML config file.
+    #[arg(short, long)]
+    pub config: Option<PathBuf>,
+
+    /// How long the link should live, e.g. `1h`, `1d`, `1w`. Capped by
+    /// `[links] max_lifetime`. Defaults to `[links] default_lifetime`.
+    #[arg(long = "for", value_name = "DURATION", conflicts_with = "until")]
+    pub for_duration: Option<String>,
+
+    /// Expire at a specific instant, e.g. `2026-09-01` or `2026-09-01T17:00+02:00`.
+    /// Read as UTC unless it carries an offset.
+    #[arg(long, value_name = "DATE")]
+    pub until: Option<String>,
+
+    /// Origin browsers use to reach this server, e.g. `https://docs.acme.com`. Needed
+    /// when the config binds an address nobody can visit.
+    #[arg(long, value_name = "URL")]
+    pub base_url: Option<String>,
+
+    /// Address the link is issued on behalf of. The link serves only while this
+    /// address can read the page (S29). Defaults to `[auth] owner_email`.
+    #[arg(long = "as", value_name = "EMAIL")]
+    pub as_issuer: Option<String>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ShareCommand {
+    /// List share links. Prints live links only unless `--all` is given.
+    #[command(long_about = "\
+List share links: id, state, page, issuer and expiry.
+
+Prints live links only unless --all is given. --json emits an inventory, one object \
+per link. Neither carries a token: a link URL is shown once when it is created and \
+cannot be recovered afterwards, so this says what exists, never how to reach it.")]
+    List(ShareListArgs),
+    /// Revoke one link by id, or every live link.
+    #[command(long_about = "\
+Revoke one link by the id `share list` prints, or every live link with --all.
+
+Revocation takes effect on the very next request. Revoking an already-revoked link \
+succeeds and changes nothing. A revoked link cannot be reinstated — the URL is not \
+recoverable — so restoring access means creating a new link with `mdshelf share`.")]
+    Revoke(ShareRevokeArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ShareListArgs {
+    /// Path to the TOML config file.
+    #[arg(short, long)]
+    pub config: Option<PathBuf>,
+
+    /// Include revoked and expired links, with their state.
+    #[arg(long)]
+    pub all: bool,
+
+    /// Emit JSON, one object per link. Contains no token: a link cannot be recovered,
+    /// only inventoried (S24).
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ShareRevokeArgs {
+    /// Path to the TOML config file.
+    #[arg(short, long)]
+    pub config: Option<PathBuf>,
+
+    /// The link id shown by `share list` and written to the access log.
+    #[arg(value_name = "ID", required_unless_present = "all")]
+    pub id: Option<String>,
+
+    /// Revoke every live link. The incident lever (S11).
+    #[arg(long, conflicts_with = "id")]
+    pub all: bool,
+}
+
 #[derive(Args, Debug, Clone)]
 pub struct AclExplainArgs {
     /// Path to the TOML config file.
@@ -309,6 +417,13 @@ impl Cli {
             Command::Acl(AclCommand::Doctor(args)) => acl_doctor(args),
             Command::Acl(AclCommand::Grant(args)) => acl_grant(args),
             Command::Audit(args) => audit(args),
+            Command::Share(args) => match args.command.clone() {
+                Some(ShareCommand::List(list_args)) => crate::links::commands::list(&list_args),
+                Some(ShareCommand::Revoke(revoke_args)) => {
+                    crate::links::commands::revoke(&revoke_args)
+                }
+                None => crate::links::commands::create(&args),
+            },
             Command::Auth(AuthCommand::Setup(args)) => auth_setup(args).await,
             Command::Install(args) => crate::service::install(args),
             Command::Uninstall(args) => crate::service::uninstall(args),
@@ -422,7 +537,25 @@ fn check(args: CheckArgs) -> Result<()> {
     if rule_count > 0 {
         println!("access rules: {rule_count} (all valid)");
     }
+
+    // R5: sharing is a property of which theme is running, so a custom theme that has
+    // never adopted the partial silently has no Share button. Say so once, here, rather
+    // than leaving somebody to wonder why the control never appears.
+    if (config.auth.is_some() || config.links.is_some()) && !theme_offers_share_control(&theme)? {
+        println!(
+            "  ⚠ this theme does not place {{{{ share_control }}}}, so no page will carry \
+             a Share button. `mdshelf share` on the command line is unaffected."
+        );
+    }
     Ok(())
+}
+
+/// Whether any template in the resolved theme places the Share control (S25/R5).
+fn theme_offers_share_control(theme: &ThemeStack) -> Result<bool> {
+    Ok(theme
+        .template_files()?
+        .iter()
+        .any(|entry| entry.source.contains("share_control")))
 }
 
 fn acl_explain(args: AclExplainArgs) -> Result<()> {
@@ -709,13 +842,24 @@ fn audit(args: AuditArgs) -> Result<()> {
     // conclusion, in the one situation where the answer matters.
     let mut read = 0usize;
     let mut refused = 0usize;
+    let mut probes = 0usize;
     for entry in &entries {
-        let outcome = if entry.outcome == "allow" {
-            read += 1;
-            "read"
-        } else {
-            refused += 1;
-            "REFUSED"
+        let outcome = match entry.outcome.as_str() {
+            "allow" => {
+                read += 1;
+                "read"
+            }
+            // S15: a request under the link prefix carrying a token nobody minted.
+            // Counted apart from a refusal, because it is a stranger scanning rather
+            // than a colleague who was turned away.
+            crate::auth::store::BAD_LINK_OUTCOME => {
+                probes += 1;
+                "BAD-LINK"
+            }
+            _ => {
+                refused += 1;
+                "REFUSED"
+            }
         };
         println!(
             "  {:<9} {:<28} {:<36} {}",
@@ -726,7 +870,11 @@ fn audit(args: AuditArgs) -> Result<()> {
         );
     }
     println!();
-    println!("{read} read, {refused} refused");
+    if probes > 0 {
+        println!("{read} read, {refused} refused, {probes} unknown link(s)");
+    } else {
+        println!("{read} read, {refused} refused");
+    }
     Ok(())
 }
 

@@ -32,6 +32,12 @@ pub struct PageTemplateContext {
     pub all_sites: Vec<SiteListEntry>,
     pub config: ConfigSummary,
     pub live_reload: bool,
+    /// The Share control, already rendered (S25).
+    ///
+    /// Empty when there is nothing to offer — auth off, links disabled, or a surface
+    /// that is not a page. A theme places it with `{{ share_control | safe }}`; one that
+    /// never mentions it simply has no sharing, and renders without error (US-14).
+    pub share_control: String,
 }
 
 #[derive(Serialize)]
@@ -39,6 +45,45 @@ pub struct HomeTemplateContext {
     pub all_sites: Vec<SiteListEntry>,
     pub config: ConfigSummary,
     pub live_reload: bool,
+}
+
+/// The reading view a share-link recipient gets (S6/S31).
+///
+/// Carries no site name, no logo, no navigation and no site switcher — only what is
+/// needed to read one page and know where it came from. `site` holds a colour and
+/// nothing else, so a theme that renders it cannot accidentally name the site.
+#[derive(Serialize)]
+pub struct LinkTemplateContext {
+    pub page: LinkPageContext,
+    pub banner: LinkBannerContext,
+    pub site: LinkSiteContext,
+    /// The live-reload client for this one link, already carrying the token (S27).
+    ///
+    /// Pre-rendered rather than assembled in the template: the socket path holds a
+    /// token, and building a script literal out of template interpolation is exactly
+    /// where an escaping mistake would become an injection.
+    pub reload_script: String,
+    pub live_reload: bool,
+    pub config: ConfigSummary,
+}
+
+#[derive(Serialize)]
+pub struct LinkPageContext {
+    pub title: String,
+    pub html: String,
+}
+
+#[derive(Serialize)]
+pub struct LinkBannerContext {
+    /// The address that issued the link. Reaches everyone the URL reaches (R1).
+    pub issuer: String,
+    /// Remaining time, already humanised: "20 hours".
+    pub expires_in: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct LinkSiteContext {
+    pub color: String,
 }
 
 #[derive(Serialize)]
@@ -70,6 +115,21 @@ pub struct PageContext {
     pub headings: Vec<crate::render::Heading>,
     pub frontmatter: serde_json::Value,
     pub html: String,
+    /// This page's Markdown source, escaped for a `<script type="text/markdown">`
+    /// block (§7.1). `None` for a surface with no `.md` file behind it — the home
+    /// page, an error page, or an auto-generated folder index — which is what drives
+    /// the disabled page-actions items.
+    ///
+    /// Escaped here rather than in the template because minijinja's autoescape is HTML
+    /// entity escaping, and entities are not decoded inside a script element. The
+    /// template therefore has to use `| safe`, and this field is what makes that sound.
+    pub source_escaped: Option<String>,
+    /// Absolute path of the download route for this page, e.g.
+    /// `/__mdshelf/md/docs/guides/setup`. Emitted server-side so the browser never has
+    /// to reason about which site mount it is under.
+    pub md_url: Option<String>,
+    /// The on-disk basename the download is saved as, e.g. `setup.md`.
+    pub source_filename: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -152,6 +212,18 @@ impl Renderer {
             "layouts/index.html"
         };
         self.render_named(name, ctx)
+    }
+
+    /// Render the reading view.
+    ///
+    /// Falls back to a self-contained page when the theme has no `layouts/link.html`
+    /// (R5): a custom theme that has never heard of share links must still be able to
+    /// serve one, rather than answering a recipient with a template error.
+    pub fn render_link(&self, ctx: &LinkTemplateContext) -> Result<String> {
+        if self.inner.template_names.contains("layouts/link.html") {
+            return self.render_named("layouts/link.html", ctx);
+        }
+        Ok(crate::links::pages::reading_view_fallback(ctx))
     }
 
     pub fn render_error(&self, ctx: &ErrorTemplateContext) -> Result<String> {

@@ -243,3 +243,76 @@ async fn no_secret_appears_in_any_log_line() {
         );
     }
 }
+
+/// SEC-2, for share links.
+///
+/// Shares the capture buffer with the test above — deliberately, since the assertion is
+/// an absence over everything the process logged, and a wider buffer only makes it
+/// stricter.
+#[tokio::test]
+async fn no_share_token_appears_in_any_log_line() {
+    let buffer = install_capture();
+
+    let idp = MockIdp::start().await;
+    let server = TestServer::start_with_auth(VAULT, &idp).await;
+    let http = client();
+
+    let token = server.mint_link("index.md", "ana@corp.com", 3_600_000);
+    let expired = server.mint_link("index.md", "ana@corp.com", -3_600_000);
+    // A token for a page nobody can read, so the S29 denial path runs too.
+    let unreadable = server.mint_link("broken.md", "ana@corp.com", 3_600_000);
+
+    // Every surface a token reaches: the reading view, an asset miss, a dead link, a
+    // link whose issuer lost access, and an unknown token.
+    for path in [
+        format!("/s/{token}"),
+        format!("/s/{token}/nothing-here"),
+        format!("/s/{expired}"),
+        format!("/s/{unreadable}"),
+        "/s/DDDDDDDDDDDDDDDDDDDDDD".to_string(),
+        "/s/not-a-token".to_string(),
+    ] {
+        let _ = http.get(server.url(&path)).send().await;
+    }
+
+    // The test must not pass simply because nothing happened: the live link really did
+    // serve, and the request path really did carry the token.
+    let served = http
+        .get(server.url(&format!("/s/{token}")))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(served.status(), 200);
+
+    let logs = captured_text(&buffer);
+    for (label, secret) in [
+        ("a live share token", token.as_str()),
+        ("an expired share token", expired.as_str()),
+        ("a denied share token", unreadable.as_str()),
+    ] {
+        assert!(
+            !logs.contains(secret),
+            "{label} reached a log line.\n\
+             Searched for: {secret}\n\
+             ---- captured logs ----\n{logs}"
+        );
+        // Not even a prefix long enough to narrow a brute-force search.
+        let prefix: &str = &secret[..8];
+        assert!(
+            !logs.contains(prefix),
+            "{label} reached a log line as a prefix: {prefix}\n\
+             ---- captured logs ----\n{logs}"
+        );
+    }
+
+    // And nothing in the database either (SEC-2 names columns as well as log lines).
+    let entries = server
+        .store()
+        .access_by_email(&format!("link:{}", TestServer::link_id(&token)))
+        .expect("audit rows");
+    assert!(!entries.is_empty(), "the reads really were recorded");
+    for entry in entries {
+        assert!(!entry.path.contains(&token));
+        assert!(!entry.email.contains(&token));
+    }
+}

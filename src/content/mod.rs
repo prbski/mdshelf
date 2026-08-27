@@ -16,6 +16,11 @@ use crate::config::{Config, SiteConfig};
 use crate::render::markdown::MarkdownRenderer;
 
 pub use page::Page;
+
+/// The canonical string form of a site-relative path, as stored on a link row.
+pub fn rel_path_key(rel_path: &std::path::Path) -> String {
+    rel_path.to_string_lossy().replace('\\', "/")
+}
 pub use site_index::{SiteIndexContext, build_site_index_context, build_site_index_under_prefix};
 use tree::flatten_nav_sidebar_rows;
 pub use tree::{NavNode, SidebarNavRow};
@@ -34,6 +39,13 @@ pub struct Site {
     pub root: PathBuf,
     pub theme: Option<PathBuf>,
     pages: Arc<BTreeMap<String, Page>>,
+    /// Site-relative source path to page-map key.
+    ///
+    /// A share link stores the path of the *file*, not the URL, so serving one needs
+    /// this direction of the lookup. Indexed rather than scanned, because NFR-5 budgets
+    /// a link read at one indexed lookup plus one ACL resolution.
+    #[serde(skip)]
+    by_rel_path: HashMap<String, String>,
     nav_root: NavNode,
     /// The unfiltered view, used when auth is off.
     #[serde(skip)]
@@ -201,6 +213,10 @@ impl Site {
 
         let nav_root = NavNode::build(&title, &mount, &pages);
         let nav_flat = Arc::new(flatten_nav_sidebar_rows(&nav_root, &pages));
+        let by_rel_path = pages
+            .iter()
+            .map(|(url_path, page)| (rel_path_key(&page.rel_path), url_path.clone()))
+            .collect();
         let pages = Arc::new(pages);
         let full_view = Arc::new(SiteView {
             pages: Arc::clone(&pages),
@@ -232,6 +248,7 @@ impl Site {
             root,
             theme: cfg.theme.clone(),
             pages,
+            by_rel_path,
             nav_root,
             full_view,
             acl,
@@ -284,6 +301,24 @@ impl Site {
             pages: Arc::new(pages),
             nav_flat,
         }
+    }
+
+    /// The page a share link names, if `issuer` may still read it (S29/US-10).
+    ///
+    /// One function, so there is exactly one place that decides whether a link serves.
+    /// `None` covers every reason at once — the file is gone, its frontmatter broke, it
+    /// became a draft, or the issuer's access was removed — and the caller answers all
+    /// of them with the same deny page (SEC-3).
+    pub fn link_page(&self, rel_path: &str, issuer: &str) -> Option<&Page> {
+        let url_path = self.by_rel_path.get(rel_path)?;
+        let page = self.pages.get(url_path)?;
+        if page.draft {
+            return None;
+        }
+        if !self.acl.allows(&page.rel_path, issuer) {
+            return None;
+        }
+        Some(page)
     }
 
     /// Whether `email` may read the file at `rel_path` within this site.

@@ -195,6 +195,8 @@ mod tests {
             public_url: public_url.to_string(),
             database_path: PathBuf::from("/tmp/mdshelf.db"),
             key_file_path: PathBuf::from("/tmp/secret.key"),
+            bad_link_retention: Duration::from_secs(7 * 86_400),
+            links: crate::links::LinkSettings::default(),
         }
     }
 

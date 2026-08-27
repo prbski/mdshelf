@@ -161,6 +161,54 @@ impl TestServer {
         format!("{}{}", self.base_url, path)
     }
 
+    /// The sidecar behind this server. Panics when auth is off.
+    pub fn store(&self) -> &crate::auth::store::Store {
+        &self
+            .state
+            .auth
+            .as_ref()
+            .expect("this server was started without auth")
+            .store
+    }
+
+    /// Mint a share link for a page in the first site, returning its plaintext token.
+    ///
+    /// Bypasses the CLI deliberately: these tests are about what the *server* does with
+    /// a row, so they set the row up directly, including states the CLI refuses to
+    /// create (an already-expired link, a link whose issuer has no access).
+    pub fn mint_link(&self, rel_path: &str, issuer: &str, lifetime_ms: i64) -> String {
+        self.mint_link_in(&self.vault.clone(), rel_path, issuer, lifetime_ms)
+    }
+
+    /// As [`TestServer::mint_link`], against an explicit site root.
+    pub fn mint_link_in(
+        &self,
+        site_root: &Path,
+        rel_path: &str,
+        issuer: &str,
+        lifetime_ms: i64,
+    ) -> String {
+        let token = crate::links::LinkToken::generate();
+        let now = crate::auth::store::now_ms();
+        self.store()
+            .insert_link(
+                &token.id(),
+                &token.hash(),
+                &site_root.to_string_lossy().replace('\\', "/"),
+                rel_path,
+                now + lifetime_ms,
+                now,
+                issuer,
+            )
+            .expect("inserting a test link");
+        token.expose().to_string()
+    }
+
+    /// The public id of a token, as listings and the access log spell it.
+    pub fn link_id(token: &str) -> String {
+        crate::links::link_id(&crate::links::token_hash(token))
+    }
+
     /// Rewrite a file in the vault and rebuild, as the watcher would.
     pub async fn write_and_rebuild(&self, relative: &str, contents: &str) {
         write_files(&self.vault, &[(relative, contents)]);

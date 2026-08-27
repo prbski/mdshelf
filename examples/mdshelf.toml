@@ -13,6 +13,14 @@ name = "mdshelf-theme"
 # Set `directory` to fully replace the bundled theme with your own:
 # directory = "./theme"
 
+# Shareable links. Only in force on a server started with `--auth google`.
+# [links]
+# enabled           = true    # incident kill switch; the rows survive
+# prefix            = "/s"    # a site may not mount here
+# default_lifetime  = "1d"
+# max_lifetime      = "30d"   # a longer request is refused, not clamped
+# revoked_retention = "90d"
+
 # Each site is mounted under its own URL prefix. Add as many as you like.
 [[sites]]
 path = "./content"

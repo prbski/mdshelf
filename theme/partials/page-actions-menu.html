@@ -1,0 +1,44 @@
+<div class="page-actions-popover" id="page-actions-menu" role="dialog" aria-label="Page actions" hidden>
+  <button
+    type="button"
+    class="page-actions-item"
+    id="page-copy-md"
+    {% if not page.source_escaped %}disabled title="This page has no Markdown file"{% endif %}
+  >
+    <svg class="page-actions-icon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect width="8" height="4" x="8" y="2" rx="1"/>
+      <path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2"/>
+      <path d="M16 4h2a2 2 0 0 1 2 2v4"/>
+      <path d="M21 14H11"/>
+      <path d="m15 10-4 4 4 4"/>
+    </svg>
+    <span class="page-actions-label">Copy as Markdown</span>
+  </button>
+  <button
+    type="button"
+    class="page-actions-item"
+    id="page-download-md"
+    {% if not page.source_escaped %}disabled title="This page has no Markdown file"{% endif %}
+  >
+    <svg class="page-actions-icon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/>
+      <path d="M14 2v4a2 2 0 0 0 2 2h4"/>
+      <path d="M12 18v-6"/>
+      <path d="m9 15 3 3 3-3"/>
+    </svg>
+    <span class="page-actions-label">Download Markdown</span>
+  </button>
+  <p class="page-actions-status" id="page-actions-status" role="status" aria-live="polite"></p>
+  <div class="page-actions-fallback" id="page-actions-fallback" hidden>
+    <p class="page-actions-fallback-heading">Select and copy</p>
+    <p class="page-actions-fallback-body">Your browser blocks clipboard access over plain HTTP.</p>
+    <textarea
+      class="page-actions-fallback-text"
+      id="page-actions-fallback-text"
+      rows="7"
+      readonly
+      spellcheck="false"
+      aria-label="Page Markdown"
+    ></textarea>
+  </div>
+</div>

@@ -125,6 +125,12 @@ pub struct AuthSettings {
     pub public_url: String,
     pub database_path: PathBuf,
     pub key_file_path: PathBuf,
+    /// How long `bad-link` rows survive (S15). Shorter than `audit_retention` because
+    /// unauthenticated strangers write them (R6).
+    pub bad_link_retention: Duration,
+    /// Resolved `[links]` settings, carried here so request handling never has to reach
+    /// back into the raw config.
+    pub links: crate::links::LinkSettings,
 }
 
 impl AuthSettings {
@@ -144,6 +150,8 @@ impl AuthSettings {
             public_url: public_url.trim_end_matches('/').to_string(),
             database_path,
             key_file_path,
+            bad_link_retention: auth.bad_link_retention(),
+            links: crate::links::LinkSettings::from_config(config),
         })
     }
 
@@ -358,15 +366,36 @@ impl AuthRuntime {
         }
     }
 
-    /// Prune access-log entries past their retention window (D27).
+    /// Prune everything with a retention window: the access log (D27), `bad-link` rows
+    /// (S15), and links dead longer than `[links] revoked_retention` (US-5).
+    ///
+    /// One sweep, on the schedule the access log already had (S23). A separate timer per
+    /// table would be three things to get wrong instead of one.
     pub fn prune_audit(&self) {
+        let now = now_ms();
         match self
             .store
-            .prune_access_log(now_ms(), self.settings.audit_retention)
+            .prune_access_log(now, self.settings.audit_retention)
         {
             Ok(0) => {}
             Ok(removed) => tracing::debug!(removed, "pruned access log entries"),
             Err(error) => warn!(%error, "pruning the access log failed"),
+        }
+        match self
+            .store
+            .prune_bad_links(now, self.settings.bad_link_retention)
+        {
+            Ok(0) => {}
+            Ok(removed) => tracing::debug!(removed, "pruned bad-link entries"),
+            Err(error) => warn!(%error, "pruning bad-link entries failed"),
+        }
+        match self
+            .store
+            .prune_links(now, self.settings.links.revoked_retention)
+        {
+            Ok(0) => {}
+            Ok(removed) => tracing::debug!(removed, "pruned dead share links"),
+            Err(error) => warn!(%error, "pruning dead share links failed"),
         }
     }
 }
@@ -532,6 +561,8 @@ mod tests {
             public_url: "https://docs.acme.com/".to_string(),
             database_path: PathBuf::from("/tmp/mdshelf.db"),
             key_file_path: PathBuf::from("/tmp/secret.key"),
+            bad_link_retention: Duration::from_secs(7 * 86_400),
+            links: crate::links::LinkSettings::default(),
         };
         // The trailing slash must not survive into the redirect URI: Google matches it
         // as an exact string.

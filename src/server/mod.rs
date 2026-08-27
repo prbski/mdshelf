@@ -1,6 +1,8 @@
 mod error;
+pub mod links;
 mod livereload;
 pub mod routes;
+pub mod share;
 pub mod tls;
 
 use std::sync::Arc;
@@ -35,6 +37,11 @@ async fn build_auth_runtime(
         bail!("--auth {provider} is not supported; only `google` is available.");
     }
 
+    // S30: refuse to start rather than shadow a site with the share route. Checked here
+    // as well as in config validation, because `--auth google` turns links on even for a
+    // config that carries neither an [auth] nor a [links] section.
+    config.validate_link_prefix()?;
+
     let auth_config = config.auth.clone().unwrap_or_default();
     let runtime = AuthRuntime::initialize(config, &auth_config, public_url.to_string())
         .await
@@ -46,6 +53,49 @@ async fn build_auth_runtime(
     Ok(Some(Arc::new(runtime)))
 }
 
+/// Warn when the server is starting without auth on a database that holds live links
+/// (US-13).
+///
+/// Those links are not being served — the prefix is not routed at all without `--auth
+/// google` (NFR-1) — and somebody is holding URLs that have silently stopped working.
+/// The database is opened read-only so this diagnostic cannot upgrade or otherwise
+/// touch a file the run is not using.
+fn warn_about_orphaned_links(config: &Config) {
+    let path = config
+        .auth
+        .as_ref()
+        .and_then(|auth| auth.database.clone())
+        .unwrap_or_else(|| config.source_dir.join("mdshelf.db"));
+    if !path.exists() {
+        return;
+    }
+    let Ok(store) = crate::auth::store::Store::open_read_only(&path) else {
+        return;
+    };
+    match store.count_live_links(crate::auth::store::now_ms()) {
+        Ok(0) | Err(_) => {}
+        Ok(count) => tracing::warn!(
+            live_links = count,
+            database = %path.display(),
+            "{}",
+            orphaned_links_warning(count)
+        ),
+    }
+}
+
+/// The text of the US-13 warning.
+///
+/// Split out so the sentence an operator actually reads is covered by a test, rather
+/// than living only inside a `warn!` nobody asserts on.
+fn orphaned_links_warning(count: i64) -> String {
+    format!(
+        "{count} share link(s) are still live in the database, but this server was \
+         started without --auth google, so the share prefix is not routed and every one \
+         of them is unreachable. Start with --auth google to serve them, or run \
+         `mdshelf share revoke --all` to retire them."
+    )
+}
+
 /// How often the access log is swept for entries past their retention window.
 const AUDIT_PRUNE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
@@ -53,12 +103,21 @@ const AUDIT_PRUNE_INTERVAL: std::time::Duration = std::time::Duration::from_secs
 ///
 /// The log is personal data with a stated retention period, so the sweep has to run on
 /// its own rather than waiting for someone to invoke a command.
-fn spawn_audit_pruner(state: &Arc<AppState>) {
+pub fn spawn_audit_pruner(state: &Arc<AppState>) {
     if state.auth.is_none() {
         return;
     }
     let state = Arc::downgrade(state);
     tokio::spawn(async move {
+        // The startup sweep, spelled out rather than left to `interval`'s
+        // fire-immediately semantics: US-5 requires it, and a reader should not have to
+        // know tokio's tick behaviour to see that it happens.
+        if let Some(state) = state.upgrade()
+            && let Some(runtime) = state.auth.clone()
+        {
+            let _ = tokio::task::spawn_blocking(move || runtime.prune_audit()).await;
+        }
+
         let mut ticker = tokio::time::interval(AUDIT_PRUNE_INTERVAL);
         loop {
             ticker.tick().await;
@@ -131,6 +190,9 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     let public_url = tls::public_url(&config, &args, &tls_mode, config.port)?;
 
     let auth = build_auth_runtime(&config, &args, &public_url).await?;
+    if auth.is_none() {
+        warn_about_orphaned_links(&config);
+    }
 
     let theme = ThemeStack::from_config(&config)?;
     let renderer = Renderer::new(&theme)?;
@@ -164,4 +226,47 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         .with_context(|| format!("parsing bind address {}", state.config.bind_addr()))?;
     info!("listening on {} ({})", public_url, tls_mode.describe());
     tls::serve(tls_mode, bind_address, application_router).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// US-13: the warning names the count, so an operator knows the size of what has
+    /// silently stopped working.
+    #[test]
+    fn the_orphaned_link_warning_names_the_count_and_the_way_out() {
+        let message = orphaned_links_warning(3);
+        assert!(message.contains('3'), "got: {message}");
+        assert!(message.contains("--auth google"), "got: {message}");
+        assert!(message.contains("share revoke --all"), "got: {message}");
+    }
+
+    /// The diagnostic must not upgrade a database this run is not using.
+    #[test]
+    fn counting_orphaned_links_never_writes_to_the_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mdshelf.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE mdshelf_meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+                 INSERT INTO mdshelf_meta VALUES ('schema_version', 1);",
+            )
+            .unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+
+        let store = crate::auth::store::Store::open_read_only(&path).unwrap();
+        // A version-1 database has no links table at all; the count must fail rather
+        // than create one.
+        assert!(store.count_live_links(0).is_err());
+        drop(store);
+
+        assert_eq!(
+            before,
+            std::fs::read(&path).unwrap(),
+            "opening read-only must leave the file byte-identical"
+        );
+    }
 }

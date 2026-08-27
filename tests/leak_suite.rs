@@ -1378,3 +1378,96 @@ async fn an_unauthenticated_server_serves_everything_as_before() {
         .expect("request");
     assert_eq!(attachment.status(), 200);
 }
+
+// ---------------------------------------------------------------------------
+// The embedded Markdown source (§11.2)
+// ---------------------------------------------------------------------------
+
+/// The source block is a second copy of the page's bytes in every response, so it is a
+/// second chance to leak the rule keys. It cannot: `Page.body` is captured *after* the
+/// frontmatter split, so `allow`/`deny` were never in it.
+#[tokio::test]
+async fn the_embedded_source_carries_the_page_but_never_its_rule_keys() {
+    let idp = MockIdp::start().await;
+    let server = TestServer::start_with_auth(VAULT, &idp).await;
+    let cookie = sign_in(&server, &idp, "hr@corp.com").await;
+
+    // hr@ may read hr/salaries, whose folder index names both an allow and a deny.
+    let body = get_as(&server, &cookie, "/docs/hr/salaries")
+        .await
+        .text()
+        .await
+        .expect("body");
+
+    // The precondition: the source really is embedded, so the absences below mean
+    // something.
+    assert!(
+        body.contains("type=\"text/markdown\""),
+        "the page must carry its source for this test to be about the source"
+    );
+    assert!(
+        body.contains(SECRET_BODY),
+        "the permitted viewer really is being served the restricted page"
+    );
+
+    for leak in ["allow:", "deny:", "hr@corp.com", "team@corp.com"] {
+        assert!(
+            !body.contains(leak),
+            "the response leaked {leak:?} — the rule keys reached the embedded source"
+        );
+    }
+}
+
+/// The same guarantee on the download route, which serves the identical bytes.
+#[tokio::test]
+async fn the_markdown_route_never_serves_a_rule_key_either() {
+    let idp = MockIdp::start().await;
+    let server = TestServer::start_with_auth(VAULT, &idp).await;
+    let cookie = sign_in(&server, &idp, "hr@corp.com").await;
+
+    let response = get_as(&server, &cookie, "/__mdshelf/md/docs/hr/salaries").await;
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.expect("body");
+
+    assert!(
+        body.contains(SECRET_BODY),
+        "precondition: the route really did serve the page"
+    );
+    for leak in ["allow:", "deny:", "hr@corp.com", "team@corp.com", "---"] {
+        assert!(
+            !body.contains(leak),
+            "the download leaked {leak:?} — frontmatter reached the source text"
+        );
+    }
+}
+
+/// A viewer without access must not get the source through the route, and the refusal
+/// must not describe what it refused.
+#[tokio::test]
+async fn the_markdown_route_is_gated_exactly_as_the_page_is() {
+    let idp = MockIdp::start().await;
+    let server = TestServer::start_with_auth(VAULT, &idp).await;
+    let cookie = sign_in(&server, &idp, "team@corp.com").await;
+
+    for path in [
+        "/__mdshelf/md/docs/hr/salaries",
+        "/__mdshelf/md/docs/hr/salaries.md",
+        "/__mdshelf/md/docs/hr",
+    ] {
+        let response = get_as(&server, &cookie, path).await;
+        assert_eq!(response.status(), 404, "{path}");
+        let body = response.text().await.expect("body");
+        for leak in [SECRET_TITLE, SECRET_BODY, SECRET_SLUG] {
+            assert!(!body.contains(leak), "{path} leaked {leak:?}");
+        }
+    }
+
+    // The precondition: team@ can read a page they are entitled to, through the same
+    // route, so the 404s above are about authorization rather than a broken route.
+    assert_eq!(
+        get_as(&server, &cookie, "/__mdshelf/md/docs/onboarding")
+            .await
+            .status(),
+        200
+    );
+}

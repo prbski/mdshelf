@@ -38,4 +38,7 @@
     <div class="doc-toc-backdrop" id="toc-backdrop" hidden></div>
   </div>
 </div>
+{% if page.source_escaped %}
+<script type="text/markdown" id="page-source" data-filename="{{ page.source_filename }}" data-md-url="{{ page.md_url }}">{{ page.source_escaped | safe }}</script>
+{% endif %}
 {% endblock %}

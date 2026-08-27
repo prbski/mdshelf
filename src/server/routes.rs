@@ -15,7 +15,9 @@ use axum_extra::extract::cookie::CookieJar;
 
 use crate::auth::SessionOutcome;
 use crate::auth::store::Outcome;
-use crate::content::page::{humanize, join_url};
+use crate::content::page::{
+    content_disposition_attachment, escape_for_script_block, humanize, join_url,
+};
 use crate::content::tree::{breadcrumbs, breadcrumbs_for_index_path, prev_next};
 use crate::content::{
     Page, Site, SiteView, Universe, build_site_index_context, build_site_index_under_prefix,
@@ -28,10 +30,30 @@ use crate::server::AppState;
 use crate::server::error::AppError;
 use crate::server::livereload;
 
+/// Prefix of the raw-Markdown download route.
+///
+/// One definition, shared by the route table, the page context, and the static export,
+/// because a second spelling of this path would send the browser somewhere that answers
+/// with the deny page and look, from the outside, exactly like a permissions bug.
+pub const MD_ROUTE_PREFIX: &str = "/__mdshelf/md";
+
 pub fn router(state: Arc<AppState>) -> Router {
     let mut router = Router::new()
         .route("/", get(home))
         .route("/__mdshelf/syntax.css", get(syntax_css))
+        // Registered here, with the other reserved routes, so it is matched before the
+        // `/{*rest}` catch-all — which hard-404s anything beginning `/__`.
+        //
+        // All three spellings, because the wildcard matches neither an empty remainder
+        // nor a bare trailing slash, and axum 0.8 does no trailing-slash folding. Left
+        // to the catch-all, `/__mdshelf/md` and `/__mdshelf/md/` would answer with the
+        // bare error page while every other path under this prefix answers with the deny
+        // page — a difference in the response that depends on the URL rather than on the
+        // viewer, which is the same hazard `site_or_not_found` handles for the share
+        // prefix.
+        .route(MD_ROUTE_PREFIX, get(page_markdown))
+        .route(&format!("{MD_ROUTE_PREFIX}/"), get(page_markdown))
+        .route(&format!("{MD_ROUTE_PREFIX}/{{*path}}"), get(page_markdown))
         .route("/__assets/{*asset_path}", get(theme_asset))
         .route("/__livereload", get(livereload::livereload_ws));
 
@@ -39,13 +61,47 @@ pub fn router(state: Arc<AppState>) -> Router {
     // server exposes exactly the surface it did before (NFR-2).
     if state.auth_enabled() {
         router = router.merge(crate::auth::routes::router());
+        // S16/NFR-1: the share prefix is routed only on a server that requires sign-in.
+        let prefix = state
+            .auth
+            .as_ref()
+            .expect("auth enabled")
+            .settings
+            .links
+            .prefix
+            .clone();
+        router = router.merge(crate::server::links::router(&prefix));
+        router = router.merge(crate::server::share::router());
     }
+
+    // SEC-2: a link URL is its token, and the trace layer logs every request URI. The
+    // span is built here so the token is replaced before it can be formatted, rather
+    // than filtered out of the logs afterwards.
+    let links_prefix = state
+        .auth
+        .as_ref()
+        .map(|runtime| runtime.settings.links.prefix.clone());
 
     router
         .route("/{*rest}", get(site_or_not_found))
         .layer(
             ServiceBuilder::new()
-                .layer(TraceLayer::new_for_http())
+                .layer(TraceLayer::new_for_http().make_span_with(
+                    move |request: &axum::http::Request<axum::body::Body>| {
+                        let uri = match links_prefix.as_deref() {
+                            Some(prefix) => {
+                                crate::server::links::redact_uri(request.uri().path(), prefix)
+                            }
+                            None => request.uri().to_string(),
+                        };
+                        tracing::debug_span!(
+                            "request",
+                            method = %request.method(),
+                            uri = %uri,
+                            version = ?request.version()
+                        )
+                    },
+                ))
                 .layer(CompressionLayer::new()),
         )
         .with_state(state)
@@ -130,7 +186,7 @@ pub enum Viewer {
 
 impl Viewer {
     /// The address to resolve ACLs against, or `None` when nothing is enforced.
-    fn email(&self) -> Option<&str> {
+    pub(crate) fn email(&self) -> Option<&str> {
         match self {
             Viewer::Unrestricted => None,
             Viewer::Anonymous => None,
@@ -139,7 +195,7 @@ impl Viewer {
     }
 }
 
-async fn resolve_viewer(state: &AppState, jar: &CookieJar) -> Viewer {
+pub(crate) async fn resolve_viewer(state: &AppState, jar: &CookieJar) -> Viewer {
     let Some(runtime) = state.auth.as_ref() else {
         return Viewer::Unrestricted;
     };
@@ -153,7 +209,7 @@ async fn resolve_viewer(state: &AppState, jar: &CookieJar) -> Viewer {
 }
 
 /// The sign-in interstitial, served for any path an anonymous visitor asks for.
-fn interstitial_response(state: &AppState) -> Response {
+pub(crate) fn interstitial_response(state: &AppState) -> Response {
     let site_name = state
         .config
         .sites
@@ -183,6 +239,40 @@ fn denied_response(state: &AppState, email: &str) -> Response {
         .into_response()
 }
 
+/// The Share control for one page, or an empty string when there is nothing to offer.
+///
+/// US-14 in one function: a signed-in viewer gets it on every page their projection
+/// contains; nobody else gets it at all. An anonymous visitor never reaches a page, a
+/// link reader is served by a different module entirely, and with auth off this returns
+/// early before touching anything (NFR-1).
+fn share_control_for(
+    state: &AppState,
+    viewer: &Viewer,
+    site: &Site,
+    page: &crate::content::Page,
+) -> String {
+    let (Some(runtime), Viewer::Signed(email)) = (state.auth.as_ref(), viewer) else {
+        return String::new();
+    };
+    if !runtime.settings.links.enabled {
+        return String::new();
+    }
+    let now = crate::auth::store::now_ms();
+    let existing = runtime
+        .store
+        .links_for_page(
+            now,
+            email,
+            &crate::links::commands::site_key(site),
+            &crate::content::rel_path_key(&page.rel_path),
+        )
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "listing this page's links failed; showing none");
+            Vec::new()
+        });
+    crate::links::control::render(&runtime.settings.links, &page.url, &existing, now)
+}
+
 /// Record the outcome of a request against the access log (US-21).
 fn log_access(state: &AppState, viewer: &Viewer, path: &str, outcome: Outcome) {
     let (Some(runtime), Viewer::Signed(email)) = (state.auth.as_ref(), viewer) else {
@@ -197,6 +287,82 @@ fn log_access(state: &AppState, viewer: &Viewer, path: &str, outcome: Outcome) {
     }
 }
 
+/// `GET /__mdshelf/md/{*path}` — the Markdown source of one page (US-4).
+///
+/// Exists only because iOS Safari mishandles Blob downloads; every other browser gets
+/// the same bytes from the embedded block without a round-trip. `get()` also answers
+/// `HEAD`, which the client's reachability probe depends on.
+///
+/// Authorization is deliberately the *same pipeline* as a page request, in the same
+/// order, ending at the same two responses. Anything less — a bare 404 where a page
+/// request returns the styled deny page — would be an observable tell that lets the
+/// vault be enumerated (D23).
+async fn page_markdown(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+    uri: Uri,
+) -> Result<Response, AppError> {
+    let raw_path = uri.path();
+    let Some(stripped) = raw_path.strip_prefix(MD_ROUTE_PREFIX) else {
+        return Err(AppError::not_found("not found"));
+    };
+
+    let viewer = resolve_viewer(&state, &jar).await;
+    if matches!(viewer, Viewer::Anonymous) {
+        // SEC-9, unchanged: every path, existing or not.
+        return Ok(interstitial_response(&state));
+    }
+
+    // Denied, missing, draft and "no site matches" all end here, with the same bytes
+    // and the same status (D23).
+    let refuse = |state: &Arc<AppState>| -> Result<Response, AppError> {
+        log_access(state, &viewer, raw_path, Outcome::Deny);
+        match &viewer {
+            Viewer::Signed(email) => Ok(denied_response(state, email)),
+            _ => Err(AppError::not_found("not found")),
+        }
+    };
+
+    let path = stripped.trim_end_matches('/');
+    let matched = {
+        let universe = state.universe.read().await;
+        match_site_path(&universe, path)
+    };
+    let Some((site, tail)) = matched else {
+        return refuse(&state);
+    };
+
+    // The viewer's own projection, never `full_view`: a page filtered out of it must be
+    // as unreachable here as it is through the renderer.
+    let view = site.view(viewer.email());
+    let Some(page) = resolve_markdown_page(&view, &normalize_tail(&tail)) else {
+        return refuse(&state);
+    };
+    // A draft is "not published", which has to look like every other thing a reader
+    // cannot have. `SiteView` keeps drafts, so the check belongs here as well as in
+    // `serve_site_request`.
+    if page.draft {
+        return refuse(&state);
+    }
+
+    // D21: the body served is the one held in memory, never a re-read of the file. The
+    // route, the embedded block, and the rendered page are therefore always the same
+    // bytes, and there is no ENOENT race against the debounced watcher.
+    let body = page.source_text();
+    let disposition = HeaderValue::from_str(&content_disposition_attachment(&page.filename))
+        .unwrap_or_else(|_| HeaderValue::from_static("attachment"));
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/markdown; charset=utf-8"),
+    );
+    headers.insert(header::CONTENT_DISPOSITION, disposition);
+
+    log_access(&state, &viewer, raw_path, Outcome::Allow);
+    Ok((StatusCode::OK, headers, body).into_response())
+}
+
 async fn site_or_not_found(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
@@ -205,6 +371,15 @@ async fn site_or_not_found(
     let raw_path = uri.path();
     if raw_path.starts_with("/__") {
         return Err(AppError::not_found("not found"));
+    }
+
+    // Everything under the share prefix belongs to the link handler, including the
+    // spellings its routes do not match. Falling through to the interstitial here would
+    // give a link reader a different answer than the deny page (SEC-3/US-9).
+    if let Some(runtime) = state.auth.as_ref()
+        && runtime.settings.links.owns_path(raw_path)
+    {
+        return Ok(crate::server::links::deny_response());
     }
 
     let viewer = resolve_viewer(&state, &jar).await;
@@ -321,6 +496,9 @@ async fn serve_site_request(
                 headings: vec![],
                 frontmatter: serde_json::json!({}),
                 html: String::new(),
+                source_escaped: None,
+                md_url: None,
+                source_filename: None,
             },
             nav_flat: view.nav_flat(),
             breadcrumbs: vec![Crumb {
@@ -333,6 +511,7 @@ async fn serve_site_request(
             all_sites: all_sites.to_vec(),
             config: config_summary(state),
             live_reload: state.live_reload_enabled,
+            share_control: String::new(),
         };
         let mut html = {
             let renderer = state.renderer.read().await;
@@ -385,6 +564,9 @@ async fn serve_site_request(
                 headings: page.headings.clone(),
                 frontmatter: page.frontmatter.clone(),
                 html: page.html.clone(),
+                source_escaped: Some(escape_for_script_block(&page.source_text())),
+                md_url: Some(format!("{MD_ROUTE_PREFIX}{}", page.url)),
+                source_filename: Some(page.filename.clone()),
             },
             nav_flat: view.nav_flat(),
             breadcrumbs: crumbs,
@@ -394,6 +576,7 @@ async fn serve_site_request(
             all_sites: all_sites.to_vec(),
             config: config_summary(state),
             live_reload: state.live_reload_enabled,
+            share_control: share_control_for(state, viewer, &site, page),
         };
         let mut html = {
             let renderer = state.renderer.read().await;
@@ -443,6 +626,9 @@ async fn serve_site_request(
                     headings: vec![],
                     frontmatter: serde_json::json!({}),
                     html: String::new(),
+                    source_escaped: None,
+                    md_url: None,
+                    source_filename: None,
                 },
                 nav_flat: view.nav_flat(),
                 breadcrumbs: crumbs,
@@ -452,6 +638,7 @@ async fn serve_site_request(
                 all_sites: all_sites.to_vec(),
                 config: config_summary(state),
                 live_reload: state.live_reload_enabled,
+                share_control: String::new(),
             };
             let mut html = {
                 let renderer = state.renderer.read().await;
@@ -580,7 +767,7 @@ fn site_list_entries(universe: &Universe) -> Vec<SiteListEntry> {
     site_list_entries_for(universe, None)
 }
 
-fn config_summary(state: &AppState) -> ConfigSummary {
+pub(crate) fn config_summary(state: &AppState) -> ConfigSummary {
     ConfigSummary {
         version: env!("CARGO_PKG_VERSION").to_string(),
         theme_name: state.config.theme.name.clone(),
@@ -629,7 +816,7 @@ fn inject_live_reload(html: String, enabled: bool) -> String {
     }
 }
 
-fn content_type_for_path(path: &Path) -> &'static str {
+pub(crate) fn content_type_for_path(path: &Path) -> &'static str {
     match path
         .extension()
         .and_then(|extension| extension.to_str())

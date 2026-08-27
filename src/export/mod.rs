@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::cli::ExportArgs;
 use crate::config::Config;
-use crate::content::page::{humanize, join_url};
+use crate::content::page::{escape_for_script_block, humanize, join_url};
 use crate::content::source::iter_site_static_files;
 use crate::content::tree::{breadcrumbs, breadcrumbs_for_index_path, prev_next};
 use crate::content::{
@@ -407,6 +407,9 @@ fn export_site_root_index(
             headings: vec![],
             frontmatter: serde_json::json!({}),
             html: String::new(),
+            source_escaped: None,
+            md_url: None,
+            source_filename: None,
         },
         nav_flat: remap_nav_flat(site_ctx.nav_flat(), site_ctx),
         breadcrumbs: vec![Crumb {
@@ -419,6 +422,8 @@ fn export_site_root_index(
         all_sites: all_sites.to_vec(),
         config: config_summary.clone(),
         live_reload: false,
+        // A static bundle has no server to mint against, so it never carries the control.
+        share_control: String::new(),
     };
     let html = renderer.render_page(&ctx)?;
     let path = url_to_output_path(output, &root_url);
@@ -468,6 +473,9 @@ fn export_folder_index(
             headings: vec![],
             frontmatter: serde_json::json!({}),
             html: String::new(),
+            source_escaped: None,
+            md_url: None,
+            source_filename: None,
         },
         nav_flat: remap_nav_flat(site_ctx.nav_flat(), site_ctx),
         breadcrumbs: crumbs,
@@ -477,6 +485,8 @@ fn export_folder_index(
         all_sites: all_sites.to_vec(),
         config: config_summary.clone(),
         live_reload: false,
+        // A static bundle has no server to mint against, so it never carries the control.
+        share_control: String::new(),
     };
     let html = renderer.render_page(&ctx)?;
     let path = url_to_output_path(output, &folder_url);
@@ -511,16 +521,27 @@ fn export_page(
     });
     let ctx = PageTemplateContext {
         site: site_context(site_ctx),
-        page: PageContext {
-            title: page.title.clone(),
-            description: page.description.clone(),
-            url: site_ctx.page_url(page),
-            url_path: page.url_path.clone(),
-            layout: page.layout.clone(),
-            draft: page.draft,
-            headings: page.headings.clone(),
-            frontmatter: page.frontmatter.clone(),
-            html: page.html.clone(),
+        page: {
+            // Same fields the server builds, so a bundle and a live page carry the same
+            // source block — which is what `export_matches_server` exists to hold true.
+            let page_url = site_ctx.page_url(page);
+            PageContext {
+                title: page.title.clone(),
+                description: page.description.clone(),
+                url_path: page.url_path.clone(),
+                layout: page.layout.clone(),
+                draft: page.draft,
+                headings: page.headings.clone(),
+                frontmatter: page.frontmatter.clone(),
+                html: page.html.clone(),
+                source_escaped: Some(escape_for_script_block(&page.source_text())),
+                md_url: Some(format!(
+                    "{}{page_url}",
+                    crate::server::routes::MD_ROUTE_PREFIX
+                )),
+                source_filename: Some(page.filename.clone()),
+                url: page_url,
+            }
         },
         nav_flat: remap_nav_flat(site_ctx.nav_flat(), site_ctx),
         breadcrumbs: crumbs,
@@ -530,6 +551,8 @@ fn export_page(
         all_sites: all_sites.to_vec(),
         config: config_summary.clone(),
         live_reload: false,
+        // A static bundle has no server to mint against, so it never carries the control.
+        share_control: String::new(),
     };
     let html = renderer.render_page(&ctx)?;
     let path = url_to_output_path(output, &site_ctx.page_url(page));

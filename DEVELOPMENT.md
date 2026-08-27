@@ -81,7 +81,14 @@ a broader rule already granted.
 - Restricted and nonexistent paths must return byte-identical responses.
 - Without `--auth google`, behaviour must be byte-identical to before auth existed.
 - `mdshelf acl grant` is the only command that may write to a user's vault.
-- No secret may appear in any log line at any level.
+- No secret may appear in any log line at any level. Share tokens count: a link URL *is*
+  its token, so the request-trace span redacts it before it can be formatted.
+- A share link reaches exactly one page plus the assets that page references — never a
+  second page, never the raw source, never an unreferenced file.
+- A share link serves only while its issuer can still read that page, revalidated on
+  every request. Expired, revoked, unknown, malformed and nonexistent links must be
+  byte-identical.
+- `mdshelf.db` is no longer disposable: it holds share links that cannot be recreated.
 
 ## Releases
 

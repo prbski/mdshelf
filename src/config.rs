@@ -27,6 +27,11 @@ pub struct Config {
     #[serde(default)]
     pub auth: Option<AuthConfig>,
 
+    /// Shareable-link settings. Absent means the defaults, which only take effect on a
+    /// server started with `--auth google` (S16).
+    #[serde(default)]
+    pub links: Option<LinksConfig>,
+
     #[serde(default)]
     pub sites: Vec<SiteConfig>,
 
@@ -83,6 +88,11 @@ pub struct AuthConfig {
     /// Path to the AEAD key file. Defaults to `~/.config/mdshelf/secret.key` (D19).
     #[serde(default)]
     pub key_file: Option<PathBuf>,
+
+    /// How long `bad-link` entries are kept (S15). Much shorter than `audit_retention`
+    /// because these rows are written by unauthenticated strangers (R6).
+    #[serde(default = "default_bad_link_retention")]
+    pub bad_link_retention: String,
 }
 
 impl Default for AuthConfig {
@@ -94,6 +104,7 @@ impl Default for AuthConfig {
             audit_retention: default_audit_retention(),
             database: None,
             key_file: None,
+            bad_link_retention: default_bad_link_retention(),
         }
     }
 }
@@ -107,6 +118,52 @@ impl AuthConfig {
     /// Parsed `audit_retention`. Validated at load time.
     pub fn audit_retention(&self) -> Duration {
         parse_duration(&self.audit_retention).unwrap_or(DEFAULT_AUDIT_RETENTION)
+    }
+
+    /// Parsed `bad_link_retention`. Validated at load time.
+    pub fn bad_link_retention(&self) -> Duration {
+        parse_duration(&self.bad_link_retention).unwrap_or(DEFAULT_BAD_LINK_RETENTION)
+    }
+}
+
+/// `[links]` section (S19).
+///
+/// Every field has a default, so `[links]` only has to be written out when something
+/// needs changing. Note that `enabled = false` is an incident kill switch and not a
+/// delete: the rows stay, so turning it back on restores exactly the links that existed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinksConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// URL prefix the share routes live under. Normalized like a site mount.
+    #[serde(default = "default_links_prefix")]
+    pub prefix: String,
+
+    /// Lifetime used when neither `--for` nor `--until` is given.
+    #[serde(default = "default_link_lifetime")]
+    pub default_lifetime: String,
+
+    /// The cap. A request for longer is refused rather than silently clamped, because
+    /// a link that quietly outlives what somebody asked for is the wrong surprise.
+    #[serde(default = "default_link_max_lifetime")]
+    pub max_lifetime: String,
+
+    /// How long a revoked or expired row is kept before the sweep deletes it.
+    #[serde(default = "default_revoked_retention")]
+    pub revoked_retention: String,
+}
+
+impl Default for LinksConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            prefix: default_links_prefix(),
+            default_lifetime: default_link_lifetime(),
+            max_lifetime: default_link_max_lifetime(),
+            revoked_retention: default_revoked_retention(),
+        }
     }
 }
 
@@ -160,9 +217,26 @@ fn default_session_max_age() -> String {
 fn default_audit_retention() -> String {
     "90d".to_string()
 }
+fn default_bad_link_retention() -> String {
+    "7d".to_string()
+}
+/// The default share-link prefix (S30).
+pub fn default_links_prefix() -> String {
+    "/s".to_string()
+}
+fn default_link_lifetime() -> String {
+    "1d".to_string()
+}
+fn default_link_max_lifetime() -> String {
+    "30d".to_string()
+}
+fn default_revoked_retention() -> String {
+    "90d".to_string()
+}
 
 const DEFAULT_SESSION_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const DEFAULT_AUDIT_RETENTION: Duration = Duration::from_secs(90 * 24 * 60 * 60);
+const DEFAULT_BAD_LINK_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Parse a duration written as `<integer><unit>`, where unit is one of `s`, `m`, `h`, `d`, `w`.
 /// Deliberately strict: a bare number or an unknown unit is an error rather than a guess,
@@ -264,6 +338,8 @@ impl Config {
             }
             parse_duration(&auth.session_max_age).context("[auth] session_max_age is invalid")?;
             parse_duration(&auth.audit_retention).context("[auth] audit_retention is invalid")?;
+            parse_duration(&auth.bad_link_retention)
+                .context("[auth] bad_link_retention is invalid")?;
             if let Some(owner) = auth.owner_email.as_deref()
                 && !is_valid_email(owner)
             {
@@ -278,6 +354,17 @@ impl Config {
             if let Some(key_file) = auth.key_file.as_mut() {
                 *key_file = expand_and_resolve(key_file, &self.source_dir)?;
             }
+        }
+
+        if let Some(links) = self.links.as_mut() {
+            // Named individually so a broken value points at the key that broke it
+            // rather than at the section (US-6).
+            parse_duration(&links.default_lifetime)
+                .context("[links] default_lifetime is invalid")?;
+            parse_duration(&links.max_lifetime).context("[links] max_lifetime is invalid")?;
+            parse_duration(&links.revoked_retention)
+                .context("[links] revoked_retention is invalid")?;
+            links.prefix = normalize_mount(&links.prefix).context("[links] prefix is invalid")?;
         }
 
         if let Some(dir) = self.theme.directory.as_mut() {
@@ -327,7 +414,46 @@ impl Config {
                 site.color = Some(palette[i % palette.len()].to_string());
             }
         }
+
+        self.validate_link_prefix()?;
         Ok(())
+    }
+
+    /// S30: a site may not mount where the share routes live.
+    ///
+    /// Only enforced once something has opted into the feature — an explicit `[links]`
+    /// or an `[auth]` section. A pre-feature vault that happens to serve a site at `/s`
+    /// keeps working exactly as it did (NFR-1), and only starts failing when its
+    /// operator turns on the thing that would actually collide.
+    pub fn validate_link_prefix(&self) -> Result<()> {
+        if self.links.is_none() && self.auth.is_none() {
+            return Ok(());
+        }
+        let prefix = self.links_prefix();
+        for site in &self.sites {
+            let mount = site.mount();
+            let collides = mount == prefix
+                || mount.starts_with(&format!("{prefix}/"))
+                || prefix.starts_with(&format!("{mount}/"));
+            if collides {
+                bail!(
+                    "site mount `{mount}` collides with the share-link prefix `{prefix}`. \
+                     Move the share route with [links] prefix = \"/share\", or mount the \
+                     site somewhere else."
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The normalized share-link prefix, defaults included.
+    pub fn links_prefix(&self) -> String {
+        let raw = self
+            .links
+            .as_ref()
+            .map(|links| links.prefix.clone())
+            .unwrap_or_else(default_links_prefix);
+        normalize_mount(&raw).unwrap_or_else(|_| default_links_prefix())
     }
 
     pub fn bind_addr(&self) -> String {
@@ -345,6 +471,7 @@ impl Config {
             server: ServerConfig::default(),
             theme: ThemeConfig::default(),
             auth: None,
+            links: None,
             sites,
             source_dir,
         };
@@ -607,6 +734,99 @@ audit_retention = "30d"
         // fails loudly instead of being silently ignored.
         let err = load_error("[auth]\nsession_max_ago = \"30d\"\n");
         assert!(err.contains("session_max_ago"), "got: {err}");
+    }
+
+    #[test]
+    fn links_section_parses_every_field() {
+        let config = load_config(
+            r#"
+[links]
+enabled = false
+prefix = "/share"
+default_lifetime = "1h"
+max_lifetime = "7d"
+revoked_retention = "14d"
+"#,
+        )
+        .expect("a full [links] section must load");
+        let links = config.links.expect("[links] present");
+        assert!(!links.enabled);
+        assert_eq!(links.prefix, "/share");
+        assert_eq!(links.default_lifetime, "1h");
+        assert_eq!(links.max_lifetime, "7d");
+        assert_eq!(links.revoked_retention, "14d");
+    }
+
+    #[test]
+    fn links_defaults_are_applied() {
+        let config = load_config("[links]\n").expect("an empty [links] must load");
+        let links = config.links.expect("[links] present");
+        assert!(links.enabled);
+        assert_eq!(links.prefix, "/s");
+        assert_eq!(links.default_lifetime, "1d");
+        assert_eq!(links.max_lifetime, "30d");
+        assert_eq!(links.revoked_retention, "90d");
+    }
+
+    /// US-6: an unparseable duration fails startup, naming the offending key.
+    #[test]
+    fn an_unparseable_link_duration_names_its_key() {
+        for (key, value) in [
+            ("default_lifetime", "soon"),
+            ("max_lifetime", "30"),
+            ("revoked_retention", "90y"),
+        ] {
+            let err = load_error(&format!("[links]\n{key} = \"{value}\"\n"));
+            assert!(err.contains(key), "the error should name {key}; got: {err}");
+        }
+        let err = load_error("[auth]\nbad_link_retention = \"soon\"\n");
+        assert!(err.contains("bad_link_retention"), "got: {err}");
+    }
+
+    #[test]
+    fn unknown_link_keys_are_refused() {
+        let err = load_error("[links]\nprefx = \"/s\"\n");
+        assert!(err.contains("prefx"), "got: {err}");
+    }
+
+    /// US-6/S30. The site loses, not the share route: an operator whose site genuinely
+    /// lives at `/s` is told to move the share route instead.
+    #[test]
+    fn a_prefix_colliding_with_a_site_mount_is_refused() {
+        // The fixture always mounts a site at /docs.
+        let err = load_error("[links]\nprefix = \"/docs\"\n");
+        assert!(err.contains("collides"), "got: {err}");
+        assert!(err.contains("/docs"), "got: {err}");
+
+        // Nesting either way is still a collision: /s/{token} would swallow /s/manual.
+        let err = load_error("[links]\nprefix = \"/docs/share\"\n");
+        assert!(err.contains("collides"), "got: {err}");
+    }
+
+    /// NFR-1: a pre-feature vault serving a site at the default prefix keeps working
+    /// until its operator turns on something that would actually collide.
+    #[test]
+    fn the_default_prefix_only_collides_once_something_opts_in() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("content")).expect("content dir");
+        let config_path = dir.path().join("mdshelf.toml");
+        let sites = "[[sites]]\npath = \"content\"\nmount = \"/s\"\n";
+
+        std::fs::write(&config_path, sites).expect("writing config");
+        Config::load(Some(&config_path)).expect("a site at /s must load without auth or links");
+
+        std::fs::write(&config_path, format!("[auth]\n\n{sites}")).expect("writing config");
+        let error = Config::load(Some(&config_path))
+            .expect_err("with [auth] present the collision must be refused");
+        assert!(format!("{error:#}").contains("collides"));
+    }
+
+    #[test]
+    fn the_resolved_prefix_is_normalized() {
+        let config = load_config("[links]\nprefix = \"share/\"\n").expect("loads");
+        assert_eq!(config.links_prefix(), "/share");
+        let config = load_config("").expect("loads");
+        assert_eq!(config.links_prefix(), "/s");
     }
 
     #[test]

@@ -10,6 +10,7 @@ pub mod cli;
 pub mod config;
 pub mod content;
 pub mod export;
+pub mod links;
 pub mod render;
 pub mod server;
 pub mod service;

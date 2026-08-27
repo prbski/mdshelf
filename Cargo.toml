@@ -92,4 +92,5 @@ rustls = { version = "0.23.43", default-features = false, features = ["ring"] }
 [dev-dependencies]
 proptest = "1.11.0"
 tempfile = "3.27.0"
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake", "connect"] }
 walkdir = "2.5.0"

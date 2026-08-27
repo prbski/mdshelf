@@ -1,0 +1,81 @@
+{# The reading view a share-link recipient sees (S6/S31).
+
+   Deliberately not an extension of layouts/base.html: base pulls in the sidebar and
+   table-of-contents behaviour, and this page has neither. It carries the theme's
+   colours, fonts and code highlighting, and nothing that would name the site — no
+   title, no logo, no switcher, no navigation. #}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex,nofollow">
+  <meta name="referrer" content="no-referrer">
+  <title>{{ page.title }}</title>
+  <link rel="stylesheet" href="/__assets/vendor/inter/inter.css">
+  <link rel="stylesheet" href="/__mdshelf/syntax.css">
+  <link rel="stylesheet" href="/__assets/css/main.css">
+  <link rel="stylesheet" href="/__assets/css/syntax.css">
+  <link rel="stylesheet" href="/__assets/vendor/katex/katex.min.css">
+  <script defer src="/__assets/vendor/katex/katex.min.js"></script>
+  <script src="/__assets/vendor/mermaid/mermaid.min.js" defer></script>
+  <script>
+    (function() {
+      try {
+        var theme = localStorage.getItem("mdshelf-theme");
+        if (theme === "dark" || theme === "light") document.documentElement.setAttribute("data-theme", theme);
+      } catch (e) {}
+    })();
+  </script>
+  <style>
+    :root {
+      --accent: {{ site.color }};
+      --accent-hover: color-mix(in srgb, {{ site.color }} 80%, var(--mix-blend-dark, black));
+      --accent-soft: color-mix(in srgb, {{ site.color }} 15%, transparent);
+    }
+    .link-shell { max-width: 48rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+    .link-banner {
+      display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: baseline;
+      margin: 0 0 2.5rem; padding: .75rem 1rem;
+      border: 1px solid var(--border, #e4e4e7); border-left: 3px solid var(--accent);
+      border-radius: 10px; font-size: .875rem; line-height: 1.5;
+    }
+    .link-banner .who { font-weight: 600; }
+    .link-banner .expiry { color: var(--muted, #52525b); }
+  </style>
+</head>
+<body class="mdshelf-body">
+  <div class="link-shell">
+    <p class="link-banner">
+      <span class="who">Shared by {{ banner.issuer }}</span>
+      <span class="expiry">expires in {{ banner.expires_in }}</span>
+    </p>
+    <article class="doc-article prose">
+      {{ page.html | safe }}
+    </article>
+  </div>
+  <script defer>
+    document.addEventListener("DOMContentLoaded", () => {
+      if (typeof katex !== "undefined") {
+        document.querySelectorAll("[data-math-style='inline']").forEach(el => {
+          katex.render(el.textContent, el, { throwOnError: false, displayMode: false });
+        });
+        document.querySelectorAll("[data-math-style='display']").forEach(el => {
+          katex.render(el.textContent, el, { throwOnError: false, displayMode: true });
+        });
+      }
+      const diagrams = document.querySelectorAll('.mermaid');
+      if (typeof mermaid !== 'undefined' && diagrams.length) {
+        const dark = document.documentElement.getAttribute('data-theme') === 'dark'
+          || (!document.documentElement.hasAttribute('data-theme')
+              && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'default' });
+        mermaid.run({ nodes: diagrams });
+      }
+    });
+  </script>
+{% if live_reload %}
+  <script>{{ reload_script | safe }}</script>
+{% endif %}
+</body>
+</html>
