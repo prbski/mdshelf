@@ -270,6 +270,7 @@ fn a_theme_without_the_partial_renders_without_it_and_without_error() {
             config: ConfigSummary {
                 version: "test".into(),
                 theme_name: None,
+                search: false,
             },
             live_reload: false,
             // The control is offered; this theme simply never places it.

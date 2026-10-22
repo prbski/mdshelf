@@ -32,6 +32,10 @@ pub struct Config {
     #[serde(default)]
     pub links: Option<LinksConfig>,
 
+    /// Site search. Absent means no search box and no search routes.
+    #[serde(default)]
+    pub search: Option<SearchConfig>,
+
     #[serde(default)]
     pub sites: Vec<SiteConfig>,
 
@@ -165,6 +169,20 @@ impl Default for LinksConfig {
             revoked_retention: default_revoked_retention(),
         }
     }
+}
+
+/// `[search]` section: ranking comes from a qmd server that indexes the corpus mdshelf
+/// writes. mdshelf decides who sees which result; qmd only ranks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SearchConfig {
+    /// Base URL of the qmd HTTP server holding this server's index,
+    /// e.g. `http://127.0.0.1:4600`.
+    pub qmd_url: String,
+
+    /// Directory mdshelf owns and fills with the page bodies qmd indexes: one
+    /// `<collection>/<page path>` file per published page, without frontmatter.
+    pub corpus: PathBuf,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -416,6 +434,45 @@ impl Config {
         }
 
         self.validate_link_prefix()?;
+        self.validate_search()?;
+        Ok(())
+    }
+
+    /// `[search]`: a reachable-looking qmd URL, and a corpus that cannot be confused
+    /// with content — mdshelf deletes stale files there, so it must never overlap a site.
+    fn validate_search(&mut self) -> Result<()> {
+        let Some(search) = self.search.as_mut() else {
+            return Ok(());
+        };
+        let url = search.qmd_url.trim_end_matches('/');
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            bail!(
+                "[search] qmd_url must start with http:// or https://; got `{}`",
+                search.qmd_url
+            );
+        }
+        search.qmd_url = url.to_string();
+        search.corpus = expand_and_resolve(&search.corpus, &self.source_dir)?;
+
+        let corpus = search.corpus.clone();
+        let mut collections = HashSet::new();
+        for site in &self.sites {
+            if corpus.starts_with(&site.path) || site.path.starts_with(&corpus) {
+                bail!(
+                    "[search] corpus {} overlaps the site at {}; mdshelf rewrites and deletes \
+                     files in the corpus, so it must be a directory of its own.",
+                    corpus.display(),
+                    site.path.display()
+                );
+            }
+            let collection = crate::search::collection_name(site.mount());
+            if !collections.insert(collection.clone()) {
+                bail!(
+                    "[search] two sites map to the search collection `{collection}`; give one \
+                     of them a different mount."
+                );
+            }
+        }
         Ok(())
     }
 
@@ -472,6 +529,7 @@ impl Config {
             theme: ThemeConfig::default(),
             auth: None,
             links: None,
+            search: None,
             sites,
             source_dir,
         };

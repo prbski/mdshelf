@@ -233,7 +233,11 @@ async fn serve_page(
         },
         reload_script: crate::links::pages::reload_script(&reload_path),
         live_reload: state.live_reload_enabled,
-        config: crate::server::routes::config_summary(&state),
+        // A link reader is not signed in and may search nothing.
+        config: crate::render::templates::ConfigSummary {
+            search: false,
+            ..crate::server::routes::config_summary(&state)
+        },
     };
 
     let rendered = {

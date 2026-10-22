@@ -27,6 +27,7 @@ Ships as a single static Rust binary with zero runtime dependencies.
 - Auto-generated index pages for folders that have no `index.md`
 - Home page listing all mounted sites with page counts
 - Copy or download any page's Markdown source straight from its header
+- **Search** — keyword and semantic search across every mounted site, with [qmd](https://github.com/tobi/qmd) ranking and results limited to pages the reader may open
 
 **Theme**
 - Bundled `mdshelf-theme` — mobile-first, responsive, light/dark aware
@@ -439,12 +440,69 @@ Keep `mdshelf share list --json` if you want an inventory of what a deletion wou
 before creating a folder's `index.md`. Serving, checking, exporting, and explaining are
 strictly read-only.
 
+## Search
+
+With a `[search]` section, every page gets a search field in its header (`/` or
+<kbd>Cmd</kbd>/<kbd>Ctrl</kbd>+<kbd>K</kbd> opens it). Results update as you type, with the
+matching words highlighted; <kbd>Enter</kbd> opens the selected page, and **All results**
+opens the full results page at `/__search?q=…`. It finds pages both by the words they
+contain and by meaning — "how do we handle incidents" finds an incident response page
+that never uses those words.
+
+mdshelf does not rank pages itself. It works with a [qmd](https://github.com/tobi/qmd)
+server (`npm install -g @tobilu/qmd`), and splits the work so that access rules stay
+mdshelf's:
+
+1. **mdshelf writes a corpus.** At startup and after every content change, mdshelf writes
+   each published page's body — frontmatter removed, drafts left out — to
+   `<corpus>/<collection>/<page path>`. The collection is the site's mount without its
+   leading `/` (`/docs/v2` → `docs-v2`). A page whose file does not end in `.md` gets `.md`
+   appended, because qmd indexes `*.md`.
+2. **qmd indexes the corpus** and answers queries over HTTP. It never sees the vault, so
+   `allow` and `deny` lists are not searchable text.
+3. **mdshelf filters what qmd ranks.** Each ranked page is looked up exactly as a page
+   request would be, for the reader asking. Pages they may not open and drafts are left
+   out, so a query that matches only restricted pages answers exactly like one that
+   matches nothing. Titles and snippets come from mdshelf's own copy of the page.
+
+```toml
+[search]
+qmd_url = "http://127.0.0.1:4600"   # the qmd server holding this site's index
+corpus  = "/var/lib/mdshelf/search" # a directory of its own: mdshelf deletes stale files here
+```
+
+Set up qmd once, with one collection per site, pointing at the corpus:
+
+```bash
+qmd --index mysite collection add /var/lib/mdshelf/search/docs --name docs
+qmd --index mysite embed                           # downloads the ~300 MB embedding model once
+qmd --index mysite mcp --http --host 127.0.0.1 --port 4600
+```
+
+Keep the index current by running `qmd --index mysite update && qmd --index mysite embed`
+on a timer; both only process what changed. Restart the qmd server after adding a
+collection, since it reads the collection list at startup.
+
+mdshelf asks qmd for keyword and vector matches fused by rank, without qmd's language-model
+reranker, so only the embedding model is loaded: about 800 MB of memory per qmd server,
+with queries in tens of milliseconds once warm. The first query after qmd starts loads
+the model and takes several seconds. If qmd is unreachable, the results page says search
+is unavailable rather than showing no matches.
+
+Notes:
+
+- Run qmd with `CI` unset: qmd refuses to load models when `CI` is set.
+- qmd always skips folders named `node_modules`, `.git`, `.cache`, `vendor`, `dist` and
+  `build`, so pages under such folders are not searchable.
+- Share-link readers get no search; anonymous visitors get the sign-in page, as for any
+  other path.
+
 ## Theme customisation
 
 Override or extend templates by pointing `[theme].directory` at a local directory:
 
-- `layouts/` — `base.html`, `doc.html`, `home.html`, `error.html`, `link.html`
-- `partials/` — `header.html`, `sidebar.html`, `toc.html`, `breadcrumbs.html`, `footer.html`
+- `layouts/` — `base.html`, `doc.html`, `home.html`, `error.html`, `link.html`, `search.html`
+- `partials/` — `header.html`, `sidebar.html`, `toc.html`, `breadcrumbs.html`, `footer.html`, `search.html`
 - `assets/` — static files served from `/__assets/...`
 
 ### Theme capabilities

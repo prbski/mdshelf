@@ -11,10 +11,10 @@ use tempfile::TempDir;
 use tokio::sync::{RwLock, broadcast};
 
 use crate::auth::{AuthRuntime, Credentials};
-use crate::config::{AuthConfig, Config, SiteConfig};
-use crate::content::Universe;
+use crate::config::{AuthConfig, Config, SearchConfig, SiteConfig};
 use crate::render::Renderer;
 use crate::render::markdown::MarkdownRenderer;
+use crate::search::SearchRuntime;
 use crate::server::AppState;
 use crate::theme::ThemeStack;
 
@@ -42,17 +42,17 @@ pub struct TestServer {
 impl TestServer {
     /// Start an unauthenticated server — the pre-auth behaviour (NFR-2).
     pub async fn start_public(files: &[(&str, &str)]) -> Self {
-        Self::start_inner(files, None, false).await
+        Self::start_inner(files, None, false, None).await
     }
 
     /// Start a server with Google auth enabled against `idp`.
     pub async fn start_with_auth(files: &[(&str, &str)], idp: &MockIdp) -> Self {
-        Self::start_inner(files, Some(idp), false).await
+        Self::start_inner(files, Some(idp), false, None).await
     }
 
     /// As [`TestServer::start_with_auth`], with the live-reload socket enabled.
     pub async fn start_with_auth_and_live_reload(files: &[(&str, &str)], idp: &MockIdp) -> Self {
-        Self::start_inner(files, Some(idp), true).await
+        Self::start_inner(files, Some(idp), true, None).await
     }
 
     /// Start an authenticated server hosting several sites.
@@ -61,22 +61,38 @@ impl TestServer {
     /// switcher above all — only differ across sites, so they cannot be exercised by a
     /// single-site harness.
     pub async fn start_with_auth_sites(sites: &[TestSite<'_>], idp: &MockIdp) -> Self {
-        Self::start_inner_sites(sites, Some(idp), false).await
+        Self::start_inner_sites(sites, Some(idp), false, None).await
     }
 
-    async fn start_inner(files: &[(&str, &str)], idp: Option<&MockIdp>, live_reload: bool) -> Self {
+    /// Start a server with `[search]` pointing at `qmd`, its corpus inside the temporary
+    /// directory. `idp` decides whether sign-in is enforced.
+    pub async fn start_with_search(
+        sites: &[TestSite<'_>],
+        idp: Option<&MockIdp>,
+        qmd_url: &str,
+    ) -> Self {
+        Self::start_inner_sites(sites, idp, false, Some(qmd_url)).await
+    }
+
+    async fn start_inner(
+        files: &[(&str, &str)],
+        idp: Option<&MockIdp>,
+        live_reload: bool,
+        qmd_url: Option<&str>,
+    ) -> Self {
         let sites = [TestSite {
             mount: "/docs",
             title: "Docs",
             files,
         }];
-        Self::start_inner_sites(&sites, idp, live_reload).await
+        Self::start_inner_sites(&sites, idp, live_reload, qmd_url).await
     }
 
     async fn start_inner_sites(
         sites: &[TestSite<'_>],
         idp: Option<&MockIdp>,
         live_reload: bool,
+        qmd_url: Option<&str>,
     ) -> Self {
         let dir = TempDir::new().expect("creating a temporary vault");
 
@@ -99,6 +115,10 @@ impl TestServer {
         let mut config = Config::for_test(dir.path().to_path_buf(), site_configs);
         config.host = "127.0.0.1".to_string();
         config.port = addr.port();
+        config.search = qmd_url.map(|url| SearchConfig {
+            qmd_url: url.to_string(),
+            corpus: dir.path().join("search"),
+        });
 
         let auth = match idp {
             Some(idp) => {
@@ -131,7 +151,11 @@ impl TestServer {
 
         let theme = ThemeStack::from_config(&config).expect("loading the theme");
         let renderer = Renderer::new(&theme).expect("building the renderer");
-        let universe = Universe::build(&config).expect("building the universe");
+        let universe = crate::server::build_universe(&config).expect("building the universe");
+        let search = config
+            .search
+            .as_ref()
+            .map(|search| Arc::new(SearchRuntime::new(search).expect("building search")));
         let (live_reload_tx, _) = broadcast::channel(32);
 
         let state = Arc::new(AppState {
@@ -142,6 +166,7 @@ impl TestServer {
             live_reload_tx,
             live_reload_enabled: live_reload,
             auth,
+            search,
         });
 
         let router = crate::server::routes::router(Arc::clone(&state));
@@ -159,6 +184,17 @@ impl TestServer {
 
     pub fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
+    }
+
+    /// The search corpus directory. Panics when search is off.
+    pub fn corpus(&self) -> PathBuf {
+        self.state
+            .config
+            .search
+            .as_ref()
+            .expect("this server was started without search")
+            .corpus
+            .clone()
     }
 
     /// The sidecar behind this server. Panics when auth is off.
@@ -223,7 +259,8 @@ impl TestServer {
 
     /// Rebuild content the way the filesystem watcher does.
     pub async fn rebuild(&self) {
-        let rebuilt = Universe::build(&self.state.config).expect("rebuilding the universe");
+        let rebuilt =
+            crate::server::build_universe(&self.state.config).expect("rebuilding the universe");
         *self.state.universe.write().await = rebuilt;
     }
 }

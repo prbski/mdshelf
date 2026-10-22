@@ -1,0 +1,56 @@
+{% extends "layouts/base.html" %}
+{% block title %}{% if query %}{{ query }} · Search{% else %}Search{% endif %}{% endblock %}
+{% block body %}
+<div class="search-shell">
+  <header class="search-page-header">
+    <a class="search-page-home" href="/">
+      <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+      All sites
+    </a>
+    <button type="button" class="icon-button theme-toggle" id="theme-toggle" aria-label="Toggle color theme">
+      <svg class="sun-icon" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+      <svg class="moon-icon" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+    </button>
+  </header>
+
+  <main class="search-page-main">
+    <form class="search-page-form" action="/__search" method="get" role="search">
+      <svg class="search-page-icon" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <label class="visually-hidden" for="search-page-input">Search pages</label>
+      <input class="search-page-input" id="search-page-input" type="search" name="q" value="{{ query }}" placeholder="Search pages" autocomplete="off" spellcheck="false" enterkeyhint="search" {% if not query %}autofocus{% endif %}>
+      <button class="search-page-submit" type="submit">Search</button>
+    </form>
+
+    {% if unavailable %}
+    <div class="search-page-message" role="status">
+      <p class="search-page-message-title">Search is unavailable right now</p>
+      <p>The search index did not answer. It may still be starting up — try again in a minute.</p>
+    </div>
+    {% elif not query %}
+    <div class="search-page-message">
+      <p class="search-page-message-title">Search every page you can open</p>
+      <p>Type words that appear on a page, or describe what you are looking for — “how do we handle incidents” finds the incident response page even if it never uses those words.</p>
+    </div>
+    {% elif not results %}
+    <div class="search-page-message" role="status">
+      <p class="search-page-message-title">No pages match “{{ query }}”</p>
+      <p>Try fewer or different words. Results include only pages you are allowed to open.</p>
+    </div>
+    {% else %}
+    <p class="search-page-count" role="status">{{ results | length }} result{% if results | length != 1 %}s{% endif %} for “{{ query }}”</p>
+    <ol class="search-page-results">
+      {% for result in results %}
+      <li class="search-result" style="--accent: {{ result.color }};">
+        <a class="search-result-link" href="{{ result.url }}">
+          <span class="search-result-title">{{ result.title }}</span>
+          <span class="search-result-meta"><span class="search-result-site">{{ result.site }}</span>{% if result.section %} · {{ result.section }}{% endif %}</span>
+          {% if result.snippet %}<span class="search-result-snippet">{% for segment in result.snippet %}{% if segment.match %}<mark>{{ segment.text }}</mark>{% else %}{{ segment.text }}{% endif %}{% endfor %}</span>{% endif %}
+        </a>
+      </li>
+      {% endfor %}
+    </ol>
+    {% endif %}
+  </main>
+  {% include "partials/footer.html" %}
+</div>
+{% endblock %}

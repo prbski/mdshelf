@@ -74,6 +74,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         router = router.merge(crate::server::share::router());
     }
 
+    // Search exists only when `[search]` is configured; otherwise `/__search` falls to
+    // the catch-all like any other unknown reserved path.
+    if state.search.is_some() {
+        router = router.merge(crate::server::search::router());
+    }
+
     // SEC-2: a link URL is its token, and the trace layer logs every request URI. The
     // span is built here so the token is replaced before it can be formatted, rather
     // than filtered out of the logs afterwards.
@@ -743,7 +749,10 @@ fn safe_relative_path(raw: &str) -> Option<PathBuf> {
 /// a reader how many pages exist in a site they can only partly see, which is exactly
 /// the kind of structural detail D11 keeps confidential. Sites with nothing visible are
 /// omitted entirely.
-fn site_list_entries_for(universe: &Universe, viewer: Option<&str>) -> Vec<SiteListEntry> {
+pub(crate) fn site_list_entries_for(
+    universe: &Universe,
+    viewer: Option<&str>,
+) -> Vec<SiteListEntry> {
     universe
         .sites()
         .iter()
@@ -771,6 +780,7 @@ pub(crate) fn config_summary(state: &AppState) -> ConfigSummary {
     ConfigSummary {
         version: env!("CARGO_PKG_VERSION").to_string(),
         theme_name: state.config.theme.name.clone(),
+        search: state.search.is_some(),
     }
 }
 

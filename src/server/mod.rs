@@ -2,6 +2,7 @@ mod error;
 pub mod links;
 mod livereload;
 pub mod routes;
+pub mod search;
 pub mod share;
 pub mod tls;
 
@@ -17,6 +18,7 @@ use crate::config::Config;
 use crate::content::Universe;
 use crate::render::Renderer;
 use crate::render::markdown::MarkdownRenderer;
+use crate::search::SearchRuntime;
 use crate::theme::ThemeStack;
 
 /// Decide whether auth is on, and if so build its runtime.
@@ -163,6 +165,34 @@ pub struct AppState {
     /// `None` means the server is unauthenticated and behaves exactly as it did before
     /// auth existed (NFR-2).
     pub auth: Option<Arc<AuthRuntime>>,
+    /// `None` means `[search]` is not configured: no search control, no search routes.
+    pub search: Option<Arc<SearchRuntime>>,
+}
+
+/// Load the content and, when search is on, bring the search corpus in line with it.
+///
+/// The one way content is built for serving — at startup, after every file change, and
+/// in the test harness — so the corpus can never lag the pages it describes. A corpus
+/// write failure costs search freshness, not the site: it is logged and the content is
+/// still served.
+pub fn build_universe(config: &Config) -> Result<Universe> {
+    let universe = Universe::build(config)?;
+    if let Some(search) = config.search.as_ref() {
+        match crate::search::write_corpus(&search.corpus, &universe) {
+            Ok(changes) if changes != Default::default() => tracing::info!(
+                written = changes.written,
+                removed = changes.removed,
+                "search corpus updated"
+            ),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                error = %format!("{error:#}"),
+                corpus = %search.corpus.display(),
+                "failed to update the search corpus; search results may be stale"
+            ),
+        }
+    }
+    Ok(universe)
 }
 
 impl AppState {
@@ -208,7 +238,13 @@ pub async fn run(args: ServeArgs) -> Result<()> {
 
     let theme = ThemeStack::from_config(&config)?;
     let renderer = Renderer::new(&theme)?;
-    let universe = Universe::build(&config)?;
+    let universe = build_universe(&config)?;
+    let search = config
+        .search
+        .as_ref()
+        .map(SearchRuntime::new)
+        .transpose()?
+        .map(Arc::new);
     let markdown = Arc::new(MarkdownRenderer::new());
 
     let (live_reload_tx, _) = broadcast::channel(32);
@@ -220,6 +256,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         live_reload_tx,
         live_reload_enabled,
         auth,
+        search,
     });
 
     {

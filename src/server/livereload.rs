@@ -12,7 +12,6 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{error, warn};
 
 use crate::config::Config;
-use crate::content::Universe;
 use crate::content::source::should_trigger_rebuild;
 use crate::render::Renderer;
 use crate::server::AppState;
@@ -202,7 +201,7 @@ async fn rebuild_content(state: &Arc<AppState>, config: &Arc<Config>) -> Result<
     let rebuild_result = tokio::task::spawn_blocking(move || {
         let theme = ThemeStack::from_config(config.as_ref())?;
         let renderer = Renderer::new(&theme)?;
-        let universe = Universe::build(config.as_ref())?;
+        let universe = crate::server::build_universe(config.as_ref())?;
         Ok::<_, anyhow::Error>((universe, renderer))
     })
     .await

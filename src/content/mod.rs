@@ -331,6 +331,13 @@ impl Site {
         }
     }
 
+    /// The page-map key of the page whose source is `rel_path` (as [`rel_path_key`]
+    /// spells it). Says nothing about who may read it: look the key up in a viewer's
+    /// [`SiteView`] for that.
+    pub fn url_path_for(&self, rel_path: &str) -> Option<&str> {
+        self.by_rel_path.get(rel_path).map(String::as_str)
+    }
+
     pub fn pages(&self) -> impl Iterator<Item = &Page> {
         self.pages.values()
     }

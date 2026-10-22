@@ -12,6 +12,7 @@ pub mod content;
 pub mod export;
 pub mod links;
 pub mod render;
+pub mod search;
 pub mod server;
 pub mod service;
 pub mod theme;

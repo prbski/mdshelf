@@ -96,6 +96,32 @@ pub struct ErrorTemplateContext {
     pub live_reload: bool,
 }
 
+/// The search results page.
+#[derive(Serialize)]
+pub struct SearchTemplateContext {
+    /// The query as searched; empty before the reader has typed anything.
+    pub query: String,
+    pub results: Vec<SearchResultContext>,
+    /// The index could not be reached; the page says so instead of claiming no matches.
+    pub unavailable: bool,
+    pub all_sites: Vec<SiteListEntry>,
+    pub config: ConfigSummary,
+    pub live_reload: bool,
+}
+
+/// One result a reader is allowed to see.
+#[derive(Serialize, Clone)]
+pub struct SearchResultContext {
+    pub title: String,
+    pub url: String,
+    /// The shelf the page belongs to.
+    pub site: String,
+    pub color: String,
+    /// The folders above the page, humanised: "Legal / Policies". Empty at the top.
+    pub section: String,
+    pub snippet: Vec<crate::search::Segment>,
+}
+
 #[derive(Serialize, Clone)]
 pub struct SiteContext {
     pub title: String,
@@ -157,6 +183,8 @@ pub struct SiteListEntry {
 pub struct ConfigSummary {
     pub version: String,
     pub theme_name: Option<String>,
+    /// Whether this server offers search; themes show the search control when set.
+    pub search: bool,
 }
 
 impl Renderer {
@@ -233,6 +261,10 @@ impl Renderer {
             "layouts/base.html"
         };
         self.render_named(name, ctx)
+    }
+
+    pub fn render_search(&self, ctx: &SearchTemplateContext) -> Result<String> {
+        self.render_named("layouts/search.html", ctx)
     }
 
     fn render_named<T: Serialize>(&self, name: &str, ctx: &T) -> Result<String> {

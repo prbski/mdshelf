@@ -9,7 +9,7 @@
     {% if all_sites | length > 1 %}
     <div class="site-popover-container" id="site-popover-container">
       <button type="button" class="doc-header-site with-popover" id="site-popover-button" aria-haspopup="true" aria-expanded="false">
-        {{ site.title }}
+        <span class="doc-header-site-name">{{ site.title }}</span>
         <svg class="chevron-icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
       </button>
       <div class="site-popover-menu" id="site-popover-menu" hidden>
@@ -24,12 +24,12 @@
       </div>
     </div>
     {% else %}
-    <a class="doc-header-site" href="{{ site.root_url }}">{{ site.title }}</a>
+    <a class="doc-header-site" href="{{ site.root_url }}"><span class="doc-header-site-name">{{ site.title }}</span></a>
     {% endif %}
     <span class="doc-header-page">{{ page.title }}</span>
   </div>
 
-  <div class="doc-header-actions">{{ share_control | safe }}
+  <div class="doc-header-actions">{% if config.search %}{% include "partials/search.html" %}{% endif %}{{ share_control | safe }}
     <button type="button" class="icon-button page-actions-toggle" id="page-actions-button" aria-haspopup="dialog" aria-expanded="false" aria-controls="page-actions-menu" aria-label="Page actions" title="Page actions">
       <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/>

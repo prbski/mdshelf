@@ -7,7 +7,9 @@
 //! expired token, a replayed nonce, and an unverified address.
 
 pub mod mock_idp;
+pub mod mock_qmd;
 pub mod server;
 
 pub use mock_idp::{MockIdp, TokenBehaviour, TokenSpec};
+pub use mock_qmd::MockQmd;
 pub use server::{TEST_CLIENT_ID, TestServer, TestSite, client};

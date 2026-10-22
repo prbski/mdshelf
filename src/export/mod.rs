@@ -94,9 +94,11 @@ pub fn run(args: ExportArgs) -> Result<()> {
     let output = expand_output_directory(&args.output)?;
     prepare_output_directory(&output, args.force)?;
 
+    // A static bundle has no server to search.
     let config_summary = ConfigSummary {
         version: env!("CARGO_PKG_VERSION").to_string(),
         theme_name: config.theme.name.clone(),
+        search: false,
     };
     let all_sites = site_list_entries_for_export(&selected, flat_single, viewer.as_deref());
 
