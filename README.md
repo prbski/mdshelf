@@ -2,7 +2,9 @@
 
 Turn any folder of Markdown files into a fast, beautiful, browsable site. Point mdshelf at your OpenClaw, Hermes, GBrain, wikis, notes, docs, etc. — mount each one under its own URL (e.g. `/agent`, `/hermes`, `gbrain`, `/docs`, `/notes`, `/blog`) — and read them anywhere with hot reload, clean typography, and a mobile-first theme out of the box.
 
-Pairs beautifully with [Tailscale](https://tailscale.com): one command serves your shelf to every device on your tailnet — phone, iPad, laptop. Sharing with Tailscale is fully private by default: no port forwarding, no public DNS, nothing exposed to the open internet.
+Pairs beautifully with [Tailscale](https://tailscale.com): one command serves your shelf to every device on your tailnet — phone, iPad, laptop. Serving over Tailscale is fully private by default: no port forwarding, no public DNS, nothing exposed to the open internet.
+
+Putting a shelf on the open internet? `mdshelf serve --auth google` signs readers in with Google and shows each one only the pages their address is allowed to read — the rules live in each file's frontmatter. Signed-in readers can hand anyone a link to a single page that expires on its own and can be revoked at any time.
 
 One command installs it as a native system service (launchd, systemd, or Windows SCM) that runs quietly in the background and survives reboots.
 
@@ -32,6 +34,13 @@ Ships as a single static Rust binary with zero runtime dependencies.
 - Layered theme overrides: per-site > global > built-in
 - Per-site accent colors — auto-assigned from a palette or configured explicitly
 - MiniJinja templates for layouts and partials — override any file without forking the whole theme
+
+**Access**
+- **Google sign-in** — `--auth google` puts every page behind sign-in with your own OAuth client
+- Per-page access rules in frontmatter (`allow` / `deny`), inherited through folder `index.md` files; anything not granted is denied
+- **Share links** — one page, no sign-in, expiring and revocable, from a Share button or `mdshelf share`
+- Access log with `mdshelf audit`; rule debugging with `mdshelf acl explain` and `mdshelf acl doctor`
+- Built-in HTTPS: Let's Encrypt, your own certificate, or TLS terminated by a proxy in front
 
 **Server**
 - **Hot reload** — WebSocket-based live reload; the browser refreshes automatically the moment you save a file
@@ -113,7 +122,7 @@ Open `http://127.0.0.1:4444/` for the site index.
 | Command | Description |
 |---|---|
 | `mdshelf init [dir]` | Scaffold config and sample content |
-| `mdshelf serve` | Start the web server |
+| `mdshelf serve` | Start the web server (`--auth google` for a private site) |
 | `mdshelf check` | Validate config and scan content |
 | `mdshelf export` | Export a static bundle of HTML and CSS files |
 | `mdshelf auth setup` | Walk through creating a Google OAuth client, then verify it |
@@ -124,7 +133,7 @@ Open `http://127.0.0.1:4444/` for the site index.
 | `mdshelf share <path>` | Create a link that shares one page with anyone holding the URL |
 | `mdshelf share list` | List share links (`--all` for dead ones, `--json` for an inventory) |
 | `mdshelf share revoke <id>` | Revoke one link, or `--all` to revoke every live link |
-| `mdshelf install` | Register as a native system service |
+| `mdshelf install` | Register `serve`, with any of its options, as a native system service |
 | `mdshelf start` | Start the installed service |
 | `mdshelf stop` | Stop the installed service |
 | `mdshelf restart` | Restart the installed service |
@@ -300,7 +309,7 @@ mid-page. Sessions expire absolutely after `session_max_age` (default 30 days).
 > qualification. Each such event is logged at WARN with the cause, so an outage is
 > visible in the logs rather than presenting as mysterious sign-outs.
 
-### Static export
+### Exporting a private vault
 
 A static bundle has no authentication, so exporting a vault that declares rules
 requires saying whose view it is:
@@ -468,6 +477,31 @@ sudo mdshelf uninstall
 
 Use `--user` for a per-user service where the platform supports it.
 
+`mdshelf install` takes every `serve` option and the service runs with exactly those, so a
+private site installs the same way it serves:
+
+```bash
+sudo mdshelf auth setup        # store Google credentials for the user installing the service
+sudo mdshelf install --auth google --behind-proxy --public-url https://docs.acme.com
+sudo mdshelf start
+```
+
+Install runs the checks `serve` runs before it binds — TLS flags, the `[auth]` and `[links]`
+settings, and the stored credentials — and refuses to register a service that could not
+start. It prints the redirect URI to register with Google.
+
+- **Credentials come from the file, not your shell.** A service does not inherit the
+  installing shell's `MDSHELF_GOOGLE_*` variables, so install requires both in
+  `~/.config/mdshelf/credentials.env` (what `mdshelf auth setup` writes). Run `auth setup`
+  as the same user that runs `install` — with `sudo`, that is root.
+- **The service gets the installer's `HOME`.** With `--auth` or `--domain`, the service is
+  given the installing user's `HOME`, so the credentials, the at-rest key
+  (`~/.config/mdshelf/secret.key`) and the ACME cache resolve to the paths install checked.
+- **Relative paths are pinned** to the directory you ran install in: `--tls-cert`,
+  `--tls-key` and `--acme-cache` are stored as absolute paths.
+- **Windows:** a Windows service cannot be given `HOME`, so `install` refuses `--auth`, and
+  `--domain` without `--acme-cache`, there.
+
 ## Serving on port 80
 
 Set `host` and `port` in your config:
@@ -504,7 +538,7 @@ Tailscale provisions a certificate automatically and makes the site available **
 tailscale serve status   # confirm the URL
 ```
 
-Pair it with `sudo mdshelf install && sudo mdshelf start` (see [System service](#system-service)) so both services survive reboots.
+Pair it with `sudo mdshelf install && sudo mdshelf start` (see [System service](#system-service)) so both services survive reboots; pass the same `--auth` and TLS flags to `install` as to `serve`.
 
 To stop serving:
 
@@ -514,7 +548,16 @@ tailscale serve off
 
 ### Public access via Tailscale Funnel
 
-To make the site reachable from the **public internet** (not just your tailnet), use Funnel instead:
+To make the site reachable from the **public internet** (not just your tailnet), use Funnel instead.
+Funnel publishes everything mdshelf serves to anyone, so serve a private site with sign-in on
+and Tailscale's hostname as the public URL:
+
+```bash
+mdshelf serve --auth google --behind-proxy --public-url https://<machine>.<tailnet>.ts.net
+```
+
+Register `https://<machine>.<tailnet>.ts.net/auth/callback` as a redirect URI on your Google
+OAuth client, then:
 
 ```bash
 tailscale funnel --bg 4444
@@ -556,7 +599,7 @@ iPadOS Safari mishandle that, so there they go through `GET /__mdshelf/md/<page>
 enforces exactly the same access rules as viewing the page — a page you may not read
 returns the same response as one that does not exist.
 
-### Static export
+### Exporting a static site
 
 ```bash
 mdshelf export                          # all sites → ./dist

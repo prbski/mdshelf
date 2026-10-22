@@ -68,7 +68,8 @@ a lost URL means creating another. Requires a server started with --auth google.
     /// Configure Google sign-in.
     #[command(subcommand)]
     Auth(AuthCommand),
-    /// Register `mdshelf` as a system service (launchd / systemd / Windows SCM).
+    /// Register `mdshelf serve` as a system service (launchd / systemd / Windows SCM).
+    /// Takes every `serve` option, so `--auth google` and the TLS flags carry over.
     Install(ServiceArgs),
     /// Remove the registered system service.
     Uninstall(ServiceNameArgs),
@@ -370,9 +371,9 @@ pub struct AclExplainArgs {
 
 #[derive(Args, Debug, Clone)]
 pub struct ServiceArgs {
-    /// Path to the TOML config file the installed service will load.
-    #[arg(short, long)]
-    pub config: Option<PathBuf>,
+    /// What the installed service runs `mdshelf serve` with.
+    #[command(flatten)]
+    pub serve: ServeArgs,
 
     /// Service name to register. Defaults to `mdshelf`.
     #[arg(long, default_value = DEFAULT_SERVICE_NAME)]

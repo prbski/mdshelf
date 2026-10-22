@@ -77,6 +77,27 @@ pub fn credentials_file() -> Result<PathBuf> {
         .join("credentials.env"))
 }
 
+/// Confirm the credentials file holds both values, and return its path.
+///
+/// An installed service does not inherit the installing shell's environment, so
+/// `MDSHELF_GOOGLE_*` variables set there never reach it; only this file does.
+pub fn require_stored_credentials() -> Result<PathBuf> {
+    let path = credentials_file()?;
+    let stored = read_env_file(&path).unwrap_or_default();
+    for name in [CLIENT_ID_ENV, CLIENT_SECRET_ENV] {
+        if stored.get(name).is_none_or(|value| value.trim().is_empty()) {
+            bail!(
+                "{name} is missing from {}.\n  \
+                 An installed service does not see this shell's environment, so it reads \
+                 Google credentials only from that file.\n  \
+                 Run `mdshelf auth setup` as the user installing the service.",
+                path.display()
+            );
+        }
+    }
+    Ok(path)
+}
+
 /// Parse a `KEY=value` file, ignoring blanks and comments.
 fn read_env_file(path: &std::path::Path) -> Option<HashMap<String, String>> {
     let contents = std::fs::read_to_string(path).ok()?;

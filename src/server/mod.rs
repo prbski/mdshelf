@@ -33,9 +33,7 @@ async fn build_auth_runtime(
         // the config happens to carry an [auth] section.
         return Ok(None);
     };
-    if provider != "google" {
-        bail!("--auth {provider} is not supported; only `google` is available.");
-    }
+    check_auth_provider(provider)?;
 
     // S30: refuse to start rather than shadow a site with the share route. Checked here
     // as well as in config validation, because `--auth google` turns links on even for a
@@ -174,7 +172,8 @@ impl AppState {
     }
 }
 
-pub async fn run(args: ServeArgs) -> Result<()> {
+/// The config `serve` runs with: the file, then `--host` / `--port` on top of it.
+pub fn load_config(args: &ServeArgs) -> Result<Config> {
     let mut config = Config::load(args.config.as_deref())?;
     if let Some(host) = args.host.clone() {
         config.host = host;
@@ -182,6 +181,19 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     if let Some(port) = args.port {
         config.port = port;
     }
+    Ok(config)
+}
+
+/// Refuse an `--auth` provider mdshelf cannot sign readers in with.
+pub fn check_auth_provider(provider: &str) -> Result<()> {
+    if provider != "google" {
+        bail!("--auth {provider} is not supported; only `google` is available.");
+    }
+    Ok(())
+}
+
+pub async fn run(args: ServeArgs) -> Result<()> {
+    let config = load_config(&args)?;
     let live_reload_enabled = config.server.live_reload && !args.no_live_reload;
 
     // Resolve TLS before anything else: an unsafe combination should fail before the

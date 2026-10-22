@@ -59,9 +59,9 @@ impl Default for ServerConfig {
     }
 }
 
-/// `[auth]` section. Presence alone does not enable auth; `mdshelf serve --auth google`
-/// (or `provider` set here plus `enabled`) turns it on. Credentials are never read from
-/// this file — they come from the environment (D14).
+/// `[auth]` section. Presence alone does not enable auth; only `mdshelf serve --auth google`
+/// turns it on. Credentials are never read from this file — they come from the environment
+/// (D14).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthConfig {
