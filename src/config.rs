@@ -454,17 +454,12 @@ impl Config {
         search.qmd_url = url.to_string();
         search.corpus = expand_and_resolve(&search.corpus, &self.source_dir)?;
 
-        let corpus = search.corpus.clone();
+        crate::search::check_corpus_location(
+            &search.corpus,
+            self.sites.iter().map(|site| site.path.as_path()),
+        )?;
         let mut collections = HashSet::new();
         for site in &self.sites {
-            if corpus.starts_with(&site.path) || site.path.starts_with(&corpus) {
-                bail!(
-                    "[search] corpus {} overlaps the site at {}; mdshelf rewrites and deletes \
-                     files in the corpus, so it must be a directory of its own.",
-                    corpus.display(),
-                    site.path.display()
-                );
-            }
             let collection = crate::search::collection_name(site.mount());
             if !collections.insert(collection.clone()) {
                 bail!(

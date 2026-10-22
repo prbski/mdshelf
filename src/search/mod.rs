@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::config::SearchConfig;
@@ -81,15 +81,85 @@ pub struct CorpusChanges {
     pub removed: usize,
 }
 
+/// Refuse a corpus that is, contains, or sits inside a site root once symlinks are
+/// resolved. mdshelf deletes files in the corpus, and `acl grant` is the only thing
+/// allowed to write to a vault, so the two must never be the same place under any name.
+pub fn check_corpus_location<'a>(
+    corpus: &Path,
+    site_roots: impl IntoIterator<Item = &'a Path>,
+) -> Result<()> {
+    let corpus_real = resolve_existing(corpus)?;
+    for root in site_roots {
+        let root_real = root
+            .canonicalize()
+            .with_context(|| format!("resolving {}", root.display()))?;
+        if corpus_real.starts_with(&root_real) || root_real.starts_with(&corpus_real) {
+            bail!(
+                "[search] corpus {} overlaps the site at {} once symlinks are resolved; \
+                 mdshelf rewrites and deletes files in the corpus, so it must be a directory \
+                 of its own.",
+                corpus.display(),
+                root.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `path` with every symlink in its existing part resolved; the part that does not
+/// exist yet is appended as written.
+fn resolve_existing(path: &Path) -> Result<PathBuf> {
+    let mut existing = path;
+    let mut missing = Vec::new();
+    loop {
+        match existing.canonicalize() {
+            Ok(real) => {
+                return Ok(missing.iter().rev().fold(real, |acc, part| acc.join(part)));
+            }
+            Err(_) => {
+                let (Some(parent), Some(name)) = (existing.parent(), existing.file_name()) else {
+                    bail!("cannot resolve {}", path.display());
+                };
+                missing.push(name.to_os_string());
+                existing = parent;
+            }
+        }
+    }
+}
+
 /// Bring `corpus` in line with `universe`: one file per published page, nothing else.
 ///
 /// Files whose content is already right are left alone, so qmd's next update sees only
 /// real changes. Any other `.md` file under the corpus is deleted, as are directories
 /// that end up empty.
+///
+/// Fails closed on symlinks: the corpus root, every directory below it and every file
+/// written must be real, and pruning never follows a link. A link here could point into
+/// a vault, and writing or deleting through it would change files nobody asked mdshelf
+/// to touch.
 pub fn write_corpus(corpus: &Path, universe: &Universe) -> Result<CorpusChanges> {
+    check_corpus_location(
+        corpus,
+        universe.sites().iter().map(|site| site.root.as_path()),
+    )?;
+    match std::fs::symlink_metadata(corpus) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => bail!(
+            "search corpus {} is not a plain directory (a symlink or a file); refusing to write",
+            corpus.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(corpus)
+                .with_context(|| format!("creating {}", corpus.display()))?;
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading {}", corpus.display()));
+        }
+    }
+
     let mut expected: HashMap<PathBuf, String> = HashMap::new();
     for site in universe.sites() {
-        let collection = corpus.join(collection_name(&site.mount));
+        let collection = PathBuf::from(collection_name(&site.mount));
         for page in site.pages().filter(|page| !page.draft) {
             let file = collection.join(corpus_file(&rel_path_key(&page.rel_path)));
             expected.insert(file, corpus_text(page));
@@ -97,39 +167,87 @@ pub fn write_corpus(corpus: &Path, universe: &Universe) -> Result<CorpusChanges>
     }
 
     let mut changes = CorpusChanges::default();
-    for (file, text) in &expected {
-        if std::fs::read_to_string(file).is_ok_and(|current| &current == text) {
-            continue;
+    for (relative, text) in &expected {
+        if let Some(parent) = relative.parent() {
+            ensure_real_dirs(corpus, parent)?;
         }
-        if let Some(parent) = file.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
+        let file = corpus.join(relative);
+        match std::fs::symlink_metadata(&file) {
+            Ok(meta) if meta.is_file() => {
+                if std::fs::read_to_string(&file).is_ok_and(|current| &current == text) {
+                    continue;
+                }
+            }
+            Ok(_) => bail!(
+                "{} in the search corpus is not a plain file (a symlink or a directory); \
+                 refusing to write through it",
+                file.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("reading {}", file.display()));
+            }
         }
-        std::fs::write(file, text).with_context(|| format!("writing {}", file.display()))?;
+        std::fs::write(&file, text).with_context(|| format!("writing {}", file.display()))?;
         changes.written += 1;
     }
 
-    if corpus.is_dir() {
-        let keep: HashSet<&Path> = expected.keys().map(PathBuf::as_path).collect();
-        changes.removed = prune(corpus, &keep)?;
-    }
+    let keep: HashSet<PathBuf> = expected
+        .keys()
+        .map(|relative| corpus.join(relative))
+        .collect();
+    changes.removed = prune(corpus, &keep)?;
     Ok(changes)
 }
 
+/// Create each directory of `relative` under `root`, refusing any that exists as a
+/// symlink or a file.
+fn ensure_real_dirs(root: &Path, relative: &Path) -> Result<()> {
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => bail!(
+                "{} in the search corpus is not a plain directory (a symlink or a file); \
+                 refusing to write through it",
+                current.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&current)
+                    .with_context(|| format!("creating {}", current.display()))?;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("reading {}", current.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Delete `.md` files under `dir` that are not in `keep`, and directories left empty.
-/// Returns the number of files deleted. `dir` itself is kept.
-fn prune(dir: &Path, keep: &HashSet<&Path>) -> Result<usize> {
+/// Returns the number of files deleted. `dir` itself is kept. Stops at the first
+/// symlink rather than follow or delete it.
+fn prune(dir: &Path, keep: &HashSet<PathBuf>) -> Result<usize> {
     let mut removed = 0;
     for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
-        let path = entry?.path();
-        if path.is_dir() {
+        let entry = entry?;
+        let path = entry.path();
+        // `DirEntry::file_type` describes the entry itself and never follows a link.
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            bail!(
+                "{} in the search corpus is a symlink; refusing to prune through it",
+                path.display()
+            );
+        }
+        if kind.is_dir() {
             removed += prune(&path, keep)?;
             if std::fs::read_dir(&path)?.next().is_none() {
                 std::fs::remove_dir(&path)
                     .with_context(|| format!("removing {}", path.display()))?;
             }
-        } else if path.extension().is_some_and(|ext| ext == "md") && !keep.contains(path.as_path())
-        {
+        } else if path.extension().is_some_and(|ext| ext == "md") && !keep.contains(&path) {
             std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
             removed += 1;
         }

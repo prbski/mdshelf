@@ -372,3 +372,119 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     }
     found
 }
+
+/// Symlinks in or around the corpus must never let mdshelf write to or delete from a
+/// vault: `acl grant` is the only command allowed to change one.
+#[cfg(unix)]
+mod corpus_symlinks {
+    use std::collections::BTreeMap;
+    use std::os::unix::fs::symlink;
+    use std::path::{Path, PathBuf};
+
+    use mdshelf::config::{Config, SiteConfig};
+    use mdshelf::content::Universe;
+    use mdshelf::search::write_corpus;
+
+    fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        super::walk(dir)
+            .into_iter()
+            .map(|path| {
+                let bytes = std::fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect()
+    }
+
+    /// A vault at `<tmp>/vault` with one published page, served at `/docs`.
+    fn vault() -> (tempfile::TempDir, PathBuf, Universe) {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path().join("vault");
+        std::fs::create_dir_all(vault.join("guides")).unwrap();
+        std::fs::write(
+            vault.join("guides/setup.md"),
+            "---\ntitle: Setup\nallow:\n  - ana@corp.com\n---\n\n# Setup\n\nSteps.\n",
+        )
+        .unwrap();
+        std::fs::write(vault.join("notes.md"), "# Notes\n\nKeep me.\n").unwrap();
+        let config = Config::for_test(
+            dir.path().to_path_buf(),
+            vec![SiteConfig::for_test_at(&vault, "/docs", "Docs")],
+        );
+        let universe = Universe::build(&config).unwrap();
+        (dir, vault, universe)
+    }
+
+    #[test]
+    fn a_collection_folder_linked_to_the_vault_is_refused() {
+        let (dir, vault, universe) = vault();
+        let corpus = dir.path().join("corpus");
+        std::fs::create_dir_all(&corpus).unwrap();
+        symlink(&vault, corpus.join("docs")).unwrap();
+        let before = snapshot(&vault);
+
+        assert!(write_corpus(&corpus, &universe).is_err());
+        assert_eq!(snapshot(&vault), before, "the vault changed");
+    }
+
+    #[test]
+    fn a_linked_folder_inside_a_collection_is_never_pruned_through() {
+        let (dir, vault, universe) = vault();
+        let corpus = dir.path().join("corpus");
+        std::fs::create_dir_all(corpus.join("docs")).unwrap();
+        // Not an expected corpus path, so pruning would delete every .md beneath it.
+        symlink(&vault, corpus.join("docs/elsewhere")).unwrap();
+        let before = snapshot(&vault);
+
+        assert!(write_corpus(&corpus, &universe).is_err());
+        assert_eq!(snapshot(&vault), before, "the vault changed");
+    }
+
+    #[test]
+    fn a_corpus_file_linked_to_a_vault_page_is_never_written_through() {
+        let (dir, vault, universe) = vault();
+        let corpus = dir.path().join("corpus");
+        std::fs::create_dir_all(corpus.join("docs/guides")).unwrap();
+        // Writing here would replace the page with its frontmatter-free body.
+        symlink(
+            vault.join("guides/setup.md"),
+            corpus.join("docs/guides/setup.md"),
+        )
+        .unwrap();
+        let before = snapshot(&vault);
+
+        assert!(write_corpus(&corpus, &universe).is_err());
+        assert_eq!(snapshot(&vault), before, "the vault changed");
+    }
+
+    #[test]
+    fn a_corpus_root_that_aliases_a_vault_is_refused() {
+        let (dir, vault, universe) = vault();
+        let before = snapshot(&vault);
+        for (name, target) in [
+            ("alias-of-vault", vault.clone()),
+            ("alias-of-parent", dir.path().to_path_buf()),
+        ] {
+            let link = dir.path().join(name);
+            symlink(&target, &link).unwrap();
+            assert!(write_corpus(&link, &universe).is_err(), "{name}");
+
+            // The same alias in a config file is rejected before anything runs.
+            let config = dir.path().join(format!("{name}.toml"));
+            std::fs::write(
+                &config,
+                format!(
+                    "[[sites]]\npath = \"{}\"\nmount = \"/docs\"\n\n[search]\nqmd_url = \"http://127.0.0.1:1\"\ncorpus = \"{}\"\n",
+                    vault.display(),
+                    link.display()
+                ),
+            )
+            .unwrap();
+            let error = Config::load(Some(&config)).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("overlaps"),
+                "{name}: {error:#}"
+            );
+        }
+        assert_eq!(snapshot(&vault), before, "the vault changed");
+    }
+}
