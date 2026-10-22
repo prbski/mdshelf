@@ -1,11 +1,12 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{Context, Result, anyhow, bail};
 use service_manager::{
-    ServiceInstallCtx, ServiceLabel, ServiceLevel, ServiceManager, ServiceStartCtx, ServiceStatus,
-    ServiceStatusCtx, ServiceStopCtx, ServiceUninstallCtx,
+    ServiceInstallCtx, ServiceLabel, ServiceLevel, ServiceManager, ServiceManagerKind,
+    ServiceStartCtx, ServiceStatus, ServiceStatusCtx, ServiceStopCtx, ServiceUninstallCtx,
+    TypedServiceManager,
 };
 
 use crate::auth::{AuthSettings, require_stored_credentials};
@@ -22,7 +23,8 @@ pub fn install(args: ServiceArgs) -> Result<()> {
     serve.config = Some(Config::resolve_path(serve.config.as_deref())?);
     let plan = plan(&serve)?;
 
-    let mut manager = <dyn ServiceManager>::native().context("detect native service manager")?;
+    let kind = ServiceManagerKind::native().context("detect native service manager")?;
+    let mut manager = TypedServiceManager::target(kind).into_box();
     if user {
         manager
             .set_level(ServiceLevel::User)
@@ -33,21 +35,13 @@ pub fn install(args: ServiceArgs) -> Result<()> {
             .context("switch service manager to system scope")?;
     }
 
-    let label = service_label(&name)?;
-    let executable_path = resolve_executable_path()?;
-
-    let install_context = ServiceInstallCtx {
-        label,
-        program: executable_path,
-        args: serve_command(&serve)?,
-        contents: None,
-        username: None,
-        working_directory: None,
-        environment: plan.environment,
-        autostart: true,
-        restart_policy: service_manager::RestartPolicy::default(),
-    };
-
+    let install_context = install_context(
+        kind,
+        service_label(&name)?,
+        resolve_executable_path()?,
+        serve_command(&serve)?,
+        plan.home,
+    )?;
     manager
         .install(install_context)
         .map_err(|err| anyhow!("install service: {err}"))?;
@@ -60,7 +54,8 @@ pub fn install(args: ServiceArgs) -> Result<()> {
 
 /// What the service needs beyond its command line.
 struct Plan {
-    environment: Option<Vec<(String, String)>>,
+    /// The installer's `HOME`, when the service must resolve paths under it.
+    home: Option<String>,
     redirect_uri: Option<String>,
 }
 
@@ -87,27 +82,147 @@ fn plan(serve: &ServeArgs) -> Result<Plan> {
     };
 
     let needs_home = serve.auth.is_some() || (serve.domain.is_some() && serve.acme_cache.is_none());
-    if !needs_home {
-        return Ok(Plan {
-            environment: None,
-            redirect_uri,
-        });
-    }
-    if cfg!(windows) {
-        bail!(
-            "Windows services cannot be given HOME, which `--auth` and `--domain` need to find \
-             credentials, the at-rest key and the ACME cache.\n  \
-             Run `mdshelf serve` with those flags under a service wrapper instead."
-        );
-    }
-    let home = std::env::var("HOME")
-        .ok()
-        .filter(|home| !home.is_empty())
-        .context("HOME is not set; the service needs it to find credentials and keys")?;
-    Ok(Plan {
-        environment: Some(vec![("HOME".to_string(), home)]),
-        redirect_uri,
+    let home = if needs_home {
+        Some(
+            std::env::var("HOME")
+                .ok()
+                .filter(|home| !home.is_empty())
+                .context("HOME is not set; the service needs it to find credentials and keys")?,
+        )
+    } else {
+        None
+    };
+    Ok(Plan { home, redirect_uri })
+}
+
+/// The service definition for `kind`, with the command encoded the way that backend
+/// reads it.
+///
+/// launchd and the Windows service controller keep arguments apart. systemd, OpenRC and
+/// rc.d receive one string joined with spaces: systemd unquotes it by its own rules, so
+/// every argument is quoted for systemd; the OpenRC and rc.d scripts word-split it with
+/// no way to quote, so a value they would split or expand is refused. Only launchd,
+/// systemd and WinSW pass environment variables on, so they alone can carry `HOME`.
+fn install_context(
+    kind: ServiceManagerKind,
+    label: ServiceLabel,
+    program: PathBuf,
+    args: Vec<OsString>,
+    home: Option<String>,
+) -> Result<ServiceInstallCtx> {
+    let (program, args) = match kind {
+        ServiceManagerKind::Systemd => (
+            PathBuf::from(systemd_quote(utf8(program.as_os_str())?)),
+            args.iter()
+                .map(|arg| Ok(OsString::from(systemd_quote(utf8(arg)?))))
+                .collect::<Result<_>>()?,
+        ),
+        ServiceManagerKind::OpenRc | ServiceManagerKind::Rcd => {
+            for value in
+                std::iter::once(program.as_os_str()).chain(args.iter().map(OsString::as_os_str))
+            {
+                let value = utf8(value)?;
+                if !value.chars().all(is_word_safe) {
+                    bail!(
+                        "{kind:?} passes the service command through an unquoted shell string, \
+                         so `{value}` would be split or expanded.\n  \
+                         Use paths and values without spaces or shell characters."
+                    );
+                }
+            }
+            (program, args)
+        }
+        ServiceManagerKind::Launchd | ServiceManagerKind::Sc | ServiceManagerKind::WinSw => {
+            (program, args)
+        }
+    };
+
+    let environment = match home {
+        None => None,
+        Some(home) => match kind {
+            ServiceManagerKind::Launchd | ServiceManagerKind::WinSw => {
+                Some(vec![("HOME".to_string(), home)])
+            }
+            // Written inside `Environment="HOME=…"`: quoted, so only the quote, the escape
+            // character and systemd's `%` specifiers need escaping.
+            ServiceManagerKind::Systemd => {
+                Some(vec![("HOME".to_string(), systemd_escape(&home, false))])
+            }
+            _ => bail!(
+                "{kind:?} services are not given environment variables, so the service could \
+                 not find the credentials, at-rest key and ACME cache that `--auth` and \
+                 `--domain` need under HOME.\n  \
+                 Run `mdshelf serve` with those flags under a service definition you write."
+            ),
+        },
+    };
+
+    Ok(ServiceInstallCtx {
+        label,
+        program,
+        args,
+        contents: None,
+        username: None,
+        working_directory: None,
+        environment,
+        autostart: true,
+        restart_policy: service_manager::RestartPolicy::default(),
     })
+}
+
+/// The service definition `install` would hand the `kind` backend for `serve` and
+/// `home`, without registering anything. Lets a test feed it to a real backend writer.
+#[cfg(any(test, feature = "test-support"))]
+pub fn definition_for(
+    kind: ServiceManagerKind,
+    program: PathBuf,
+    serve: &ServeArgs,
+    home: Option<String>,
+) -> Result<ServiceInstallCtx> {
+    install_context(
+        kind,
+        service_label("mdshelf")?,
+        program,
+        serve_command(serve)?,
+        home,
+    )
+}
+
+fn utf8(value: &OsStr) -> Result<&str> {
+    value
+        .to_str()
+        .with_context(|| format!("{} is not valid UTF-8", value.to_string_lossy()))
+}
+
+/// Characters a shell word may hold without quoting.
+fn is_word_safe(character: char) -> bool {
+    character.is_ascii_alphanumeric() || "/._:@=+,-".contains(character)
+}
+
+/// One `ExecStart=` word: quoted unless it is plainly safe, so spaces stay inside it,
+/// with `%` (specifiers) and `$` (variable expansion) doubled to stay literal.
+fn systemd_quote(value: &str) -> String {
+    if !value.is_empty() && value.chars().all(is_word_safe) {
+        return value.to_string();
+    }
+    format!("\"{}\"", systemd_escape(value, true))
+}
+
+/// Escape `value` for the inside of a double-quoted systemd string. `$` is literal in
+/// `Environment=` but expands in `ExecStart=`.
+fn systemd_escape(value: &str, command_line: bool) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '%' => escaped.push_str("%%"),
+            '$' if command_line => escaped.push_str("$$"),
+            '\n' => escaped.push_str("\\n"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 /// `serve` and its flags, rebuilt from the parsed arguments with every path made
@@ -399,5 +514,53 @@ mod tests {
             command,
             ["serve", "--config", "/srv/site.toml"].map(OsString::from)
         );
+    }
+
+    fn definition(
+        kind: ServiceManagerKind,
+        config: &str,
+        home: Option<&str>,
+    ) -> Result<ServiceInstallCtx> {
+        let serve = install_args(&["--config", config]);
+        definition_for(
+            kind,
+            PathBuf::from("/usr/local/bin/mdshelf"),
+            &serve,
+            home.map(String::from),
+        )
+    }
+
+    /// OpenRC and rc.d word-split the command with no quoting, so a value they would
+    /// break is refused at install rather than registered as a service that cannot start.
+    #[test]
+    fn shell_script_backends_refuse_values_they_would_split() {
+        for kind in [ServiceManagerKind::OpenRc, ServiceManagerKind::Rcd] {
+            assert!(definition(kind, "/srv/site.toml", None).is_ok());
+            let error = definition(kind, "/srv/My Docs/site.toml", None).unwrap_err();
+            assert!(
+                error.to_string().contains("/srv/My Docs/site.toml"),
+                "{error}"
+            );
+        }
+    }
+
+    /// `--auth` needs HOME in the service; a backend that drops environment variables
+    /// would register a service that cannot find its credentials.
+    #[test]
+    fn only_backends_that_pass_environment_accept_home() {
+        for kind in [ServiceManagerKind::Launchd, ServiceManagerKind::Systemd] {
+            let ctx = definition(kind, "/srv/site.toml", Some("/home/ana")).unwrap();
+            assert_eq!(
+                ctx.environment,
+                Some(vec![("HOME".into(), "/home/ana".into())])
+            );
+        }
+        for kind in [
+            ServiceManagerKind::OpenRc,
+            ServiceManagerKind::Rcd,
+            ServiceManagerKind::Sc,
+        ] {
+            assert!(definition(kind, "/srv/site.toml", Some("/home/ana")).is_err());
+        }
     }
 }

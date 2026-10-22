@@ -499,8 +499,12 @@ start. It prints the redirect URI to register with Google.
   (`~/.config/mdshelf/secret.key`) and the ACME cache resolve to the paths install checked.
 - **Relative paths are pinned** to the directory you ran install in: `--tls-cert`,
   `--tls-key` and `--acme-cache` are stored as absolute paths.
-- **Windows:** a Windows service cannot be given `HOME`, so `install` refuses `--auth`, and
-  `--domain` without `--acme-cache`, there.
+- **Paths with spaces** work with launchd, systemd and Windows: install quotes each
+  argument for systemd, so `%` and `$` stay literal too.
+- **OpenRC, rc.d and Windows** services are not given environment variables, so `install`
+  refuses `--auth`, and `--domain` without `--acme-cache`, there. OpenRC and rc.d also
+  split their command on spaces with no way to quote, so install refuses paths or values
+  containing spaces or shell characters on those systems.
 
 ## Serving on port 80
 
